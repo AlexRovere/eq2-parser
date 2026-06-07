@@ -702,8 +702,8 @@ impl App {
         ui.horizontal(|ui| {
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut self.config.overlay_rows, 3..=15)
-                        .text("Barres max"),
+                    egui::Slider::new(&mut self.config.overlay_rows, 1..=15)
+                        .text("Joueurs max"),
                 )
                 .changed();
             ui.label(
@@ -762,6 +762,12 @@ impl App {
                 }
             });
         });
+        changed |= ui
+            .checkbox(
+                &mut self.config.overlay_text_top,
+                "Afficher le texte en haut (sous le titre) plutôt qu'en bas",
+            )
+            .changed();
         // Aperçu live sur l'encounter affiché.
         if !self.config.overlay_custom_text.trim().is_empty() {
             let enc = self
@@ -1508,8 +1514,8 @@ fn ability_breakdown(ui: &mut egui::Ui, enc: &Encounter, name: &str) {
 /// Une section de barres de l'overlay (DPS, HPS ou Power), pré-calculée.
 struct OverlaySection {
     label: &'static str,
-    /// (nom, valeur/s, total, est_soi)
-    rows: Vec<(String, f64, u64, bool)>,
+    /// (rang dans le classement, nom, valeur/s, total, est_soi)
+    rows: Vec<(usize, String, f64, u64, bool)>,
 }
 
 impl App {
@@ -1541,19 +1547,35 @@ impl App {
             let mk = |ranking: Vec<(&String, &crate::combat::Combatant)>,
                       per_sec: &dyn Fn(&crate::combat::Combatant) -> f64,
                       total: &dyn Fn(&crate::combat::Combatant) -> u64|
-             -> Vec<(String, f64, u64, bool)> {
-                ranking
-                    .into_iter()
+             -> Vec<(usize, String, f64, u64, bool)> {
+                let mut rows: Vec<(usize, String, f64, u64, bool)> = ranking
+                    .iter()
                     .take(rows_max)
-                    .map(|(n, c)| {
+                    .enumerate()
+                    .map(|(i, (n, c))| {
                         (
-                            n.clone(),
+                            i + 1,
+                            (*n).clone(),
                             per_sec(c),
                             total(c),
                             self_name.as_deref() == Some(n.as_str()),
                         )
                     })
-                    .collect()
+                    .collect();
+                // Si je suis hors du top affiché, ma ligne remplace la dernière
+                // barre (avec mon vrai rang) — on doit toujours se voir.
+                if let Some(sn) = self_name.as_deref() {
+                    let my_pos = ranking.iter().position(|(n, _)| n.as_str() == sn);
+                    if let Some(pos) = my_pos {
+                        if pos >= rows_max && rows_max > 0 {
+                            let (n, c) = ranking[pos];
+                            if let Some(last) = rows.last_mut() {
+                                *last = (pos + 1, n.clone(), per_sec(c), total(c), true);
+                            }
+                        }
+                    }
+                }
+                rows
             };
             if cfg.overlay_show_dps {
                 sections.push(OverlaySection {
@@ -1620,9 +1642,13 @@ impl App {
             .map(|l| l.to_string())
             .collect();
 
-        // Espace réservé en bas (texte custom + toasts) pour l'auto-fit des barres.
+        // Espace réservé en bas (texte custom si en bas + toasts) pour l'auto-fit.
         let row_h = 20.0 * s;
-        let custom_h = custom_lines.len() as f32 * 18.0 * s;
+        let custom_h = if cfg.overlay_text_top {
+            0.0
+        } else {
+            custom_lines.len() as f32 * 18.0 * s
+        };
         let reserved_bottom = custom_h + toasts.len() as f32 * 18.0 * s;
 
         let mut changed = false;
@@ -1710,6 +1736,18 @@ impl App {
                             );
                             ui.separator();
 
+                            // Texte custom en haut (sous le titre).
+                            if cfg.overlay_text_top {
+                                for line in &custom_lines {
+                                    ui.label(
+                                        RichText::new(line.as_str())
+                                            .size(11.0 * s)
+                                            .italics()
+                                            .color(accent),
+                                    );
+                                }
+                            }
+
                             // Sections de barres — auto-fit : on s'arrête quand
                             // la hauteur restante est épuisée.
                             let show_headers = sections.len() > 1;
@@ -1726,8 +1764,8 @@ impl App {
                                             .color(accent),
                                     );
                                 }
-                                let top = sec.rows.first().map(|r| r.2).unwrap_or(1).max(1);
-                                for (i, (name, per_sec, total, is_self)) in
+                                let top = sec.rows.first().map(|r| r.3).unwrap_or(1).max(1);
+                                for (i, (rank, name, per_sec, total, is_self)) in
                                     sec.rows.iter().enumerate()
                                 {
                                     if ui.available_height() < row_h + reserved_bottom {
@@ -1735,7 +1773,7 @@ impl App {
                                     }
                                     bar_row(
                                         ui,
-                                        name,
+                                        &format!("{rank}. {name}"),
                                         &format!("{}  ({})", fmt_f64(*per_sec), fmt_num(*total)),
                                         (*total as f64 / top as f64) as f32,
                                         BAR_COLORS[i % BAR_COLORS.len()],
@@ -1745,14 +1783,16 @@ impl App {
                                 }
                             }
 
-                            // Texte custom (template rendu, multi-lignes).
-                            for line in &custom_lines {
-                                ui.label(
-                                    RichText::new(line.as_str())
-                                        .size(11.0 * s)
-                                        .italics()
-                                        .color(accent),
-                                );
+                            // Texte custom en bas (template rendu, multi-lignes).
+                            if !cfg.overlay_text_top {
+                                for line in &custom_lines {
+                                    ui.label(
+                                        RichText::new(line.as_str())
+                                            .size(11.0 * s)
+                                            .italics()
+                                            .color(accent),
+                                    );
+                                }
                             }
 
                             // Toasts triggers.
@@ -1837,7 +1877,7 @@ fn overlay_quick_menu(
             .add(egui::Slider::new(&mut cfg.overlay_scale, 0.6..=2.0).text("Taille du texte"))
             .changed();
         *changed |= ui
-            .add(egui::Slider::new(&mut cfg.overlay_rows, 3..=15).text("Barres max"))
+            .add(egui::Slider::new(&mut cfg.overlay_rows, 1..=15).text("Joueurs max"))
             .changed();
         ui.label(
             RichText::new("↘ Redimensionne la fenêtre par le grip en bas à droite.")
@@ -1883,6 +1923,9 @@ fn overlay_quick_menu(
                 }
             });
         });
+        *changed |= ui
+            .checkbox(&mut cfg.overlay_text_top, "Texte en haut (sous le titre)")
+            .changed();
         ui.separator();
 
         if ui

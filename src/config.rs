@@ -37,8 +37,10 @@ pub struct Config {
     pub overlay_show_power: bool,
     /// Barre de titre détaillée : durée + total + DPS raid + kills.
     pub overlay_title_stats: bool,
-    /// Ligne de texte libre affichée en bas de l'overlay.
+    /// Ligne de texte libre (template à variables) de l'overlay.
     pub overlay_custom_text: String,
+    /// Afficher le texte custom en haut (sous le titre) plutôt qu'en bas.
+    pub overlay_text_top: bool,
     pub triggers: Vec<Trigger>,
     /// Fusionner les pets dans leur propriétaire à l'affichage.
     pub merge_pets: bool,
@@ -67,6 +69,7 @@ impl Default for Config {
             overlay_show_power: false,
             overlay_title_stats: true,
             overlay_custom_text: String::new(),
+            overlay_text_top: true,
             triggers: Vec::new(),
             merge_pets: true,
             pet_assignments: HashMap::new(),
