@@ -44,6 +44,17 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
 - **Comparaison d'encounters** : épingle un combat (📌 dans l'onglet Encounters),
   ouvre-en un autre → table A/B avec Δ % par joueur + superposition des courbes
   en pointillés sur le graphe.
+- **Historique persistant** : les encounters sont sauvegardés par personnage/serveur
+  (`history/*.json`, cap configurable) et rechargés au lancement, avec déduplication
+  au ré-import d'un log.
+- **Alliés / ennemis** : inférence de faction automatique (attaque = camps opposés,
+  soin = même camp) — les mobs n'apparaissent plus dans les classements, même les
+  named capitalisés. Option pour tout afficher.
+- **Death report** : pour chaque mort, qui / quand / tué par qui + la table des
+  coups encaissés dans les 12 dernières secondes.
+
+Voir [ROADMAP.md](ROADMAP.md) pour les features restantes vs ACT (triggers TTS/timers,
+spell timers, agrégat de session, détail par cible…).
 
 ## Prérequis côté jeu
 

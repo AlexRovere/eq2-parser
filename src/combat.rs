@@ -2,10 +2,10 @@
 //! offensive et se termine après `timeout` secondes d'inactivité.
 
 use crate::parser::{LogEvent, ParsedLine};
-use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AbilityStats {
     pub damage: u64,
     pub healing: u64,
@@ -32,7 +32,8 @@ impl AbilityStats {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Combatant {
     pub damage: u64,
     pub healing: u64,
@@ -100,13 +101,48 @@ impl Combatant {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Un coup encaissé récemment — pour le rapport de mort.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentHit {
+    pub epoch: u64,
+    pub attacker: String,
+    pub ability: Option<String>,
+    pub amount: u64,
+}
+
+/// Rapport de mort : qui, quand, par qui, avec les derniers coups encaissés.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeathRecord {
+    pub epoch: u64,
+    pub victim: String,
+    pub killer: String,
+    pub hits: Vec<RecentHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Encounter {
     pub start: u64,
     pub end: u64,
     pub finished: bool,
     pub combatants: BTreeMap<String, Combatant>,
     pub kills: Vec<String>,
+    /// Arêtes "x a attaqué y" — pour l'inférence alliés/ennemis.
+    pub attacks: BTreeMap<String, BTreeSet<String>>,
+    /// Arêtes "x a soigné/wardé/régénéré y" — même faction.
+    pub assists: BTreeMap<String, BTreeSet<String>>,
+    /// Rapports de mort (avec les derniers coups encaissés).
+    pub deaths_log: Vec<DeathRecord>,
+    /// Ensemble des alliés, calculé à l'affichage (non persisté).
+    /// `None` = pas de filtre, tout le monde est visible.
+    #[serde(skip)]
+    pub allies: Option<BTreeSet<String>>,
+}
+
+impl Default for Encounter {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl Encounter {
@@ -117,7 +153,16 @@ impl Encounter {
             finished: false,
             combatants: BTreeMap::new(),
             kills: Vec::new(),
+            attacks: BTreeMap::new(),
+            assists: BTreeMap::new(),
+            deaths_log: Vec::new(),
+            allies: None,
         }
+    }
+
+    /// Un combattant est-il visible (filtre alliés/ennemis) ?
+    pub fn visible(&self, name: &str) -> bool {
+        self.allies.as_ref().is_none_or(|a| a.contains(name))
     }
 
     pub fn duration(&self) -> u64 {
@@ -146,12 +191,13 @@ impl Encounter {
         c.healing as f64 / self.duration() as f64
     }
 
-    /// Combattants triés par dégâts décroissants (seulement ceux qui ont agi).
+    /// Combattants triés par dégâts décroissants (seulement ceux qui ont agi,
+    /// filtrés par le set d'alliés si présent).
     pub fn damage_ranking(&self) -> Vec<(&String, &Combatant)> {
         let mut v: Vec<_> = self
             .combatants
             .iter()
-            .filter(|(_, c)| c.damage > 0)
+            .filter(|(n, c)| c.damage > 0 && self.visible(n))
             .collect();
         v.sort_by(|a, b| b.1.damage.cmp(&a.1.damage));
         v
@@ -161,7 +207,7 @@ impl Encounter {
         let mut v: Vec<_> = self
             .combatants
             .iter()
-            .filter(|(_, c)| c.healing > 0)
+            .filter(|(n, c)| c.healing > 0 && self.visible(n))
             .collect();
         v.sort_by(|a, b| b.1.healing.cmp(&a.1.healing));
         v
@@ -171,7 +217,7 @@ impl Encounter {
         let mut v: Vec<_> = self
             .combatants
             .iter()
-            .filter(|(_, c)| c.power > 0)
+            .filter(|(n, c)| c.power > 0 && self.visible(n))
             .collect();
         v.sort_by(|a, b| b.1.power.cmp(&a.1.power));
         v
@@ -193,6 +239,10 @@ impl Encounter {
             finished: self.finished,
             combatants: BTreeMap::new(),
             kills: self.kills.clone(),
+            attacks: self.attacks.clone(),
+            assists: self.assists.clone(),
+            deaths_log: self.deaths_log.clone(),
+            allies: self.allies.clone(),
         };
         // D'abord les non-pets (pour que le propriétaire existe), puis les pets.
         for (name, c) in &self.combatants {
@@ -216,6 +266,89 @@ impl Encounter {
     }
 }
 
+/// Infère l'ensemble des alliés d'un encounter par propagation :
+/// attaque = factions opposées, soin = même faction.
+/// Graines : soi-même, joueurs vus dans le chat, pets et leurs propriétaires.
+pub fn compute_allies(
+    enc: &Encounter,
+    self_name: &str,
+    known_players: &HashSet<String>,
+    pet_owners: &HashMap<String, String>,
+) -> BTreeSet<String> {
+    let mut ally: BTreeSet<String> = BTreeSet::new();
+    let mut enemy: BTreeSet<String> = BTreeSet::new();
+
+    if !self_name.is_empty() {
+        ally.insert(self_name.to_string());
+    }
+    for name in enc.combatants.keys() {
+        if known_players.contains(name) {
+            ally.insert(name.clone());
+        }
+        if let Some(owner) = pet_owners.get(name) {
+            ally.insert(name.clone());
+            ally.insert(owner.clone());
+        }
+    }
+
+    // Propagation jusqu'à stabilité (graphes minuscules : quelques itérations).
+    for _ in 0..12 {
+        let mut changed = false;
+        let set_ally = |n: &String, ally: &mut BTreeSet<String>, enemy: &BTreeSet<String>| {
+            if !enemy.contains(n) && ally.insert(n.clone()) {
+                true
+            } else {
+                false
+            }
+        };
+        for (att, targets) in &enc.attacks {
+            for t in targets {
+                if ally.contains(att) && !ally.contains(t) && enemy.insert(t.clone()) {
+                    changed = true;
+                }
+                if ally.contains(t) && !ally.contains(att) && enemy.insert(att.clone()) {
+                    changed = true;
+                }
+                if enemy.contains(att) {
+                    changed |= set_ally(t, &mut ally, &enemy);
+                }
+                if enemy.contains(t) {
+                    changed |= set_ally(att, &mut ally, &enemy);
+                }
+            }
+        }
+        for (healer, targets) in &enc.assists {
+            for t in targets {
+                if ally.contains(healer) {
+                    changed |= set_ally(t, &mut ally, &enemy);
+                }
+                if ally.contains(t) {
+                    changed |= set_ally(healer, &mut ally, &enemy);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Non classés (aucune interaction avec un camp connu) : heuristique de nom —
+    // les mobs EQ2 commencent généralement par un article minuscule.
+    for name in enc.combatants.keys() {
+        if !ally.contains(name) && !enemy.contains(name) {
+            let mob_like = name.starts_with("a ")
+                || name.starts_with("an ")
+                || name.starts_with("the ")
+                || name.chars().next().is_some_and(|c| c.is_lowercase());
+            if !mob_like {
+                ally.insert(name.clone());
+            }
+        }
+    }
+
+    ally
+}
+
 pub struct CombatEngine {
     /// Secondes d'inactivité avant clôture d'un encounter.
     pub timeout: u64,
@@ -230,7 +363,9 @@ pub struct CombatEngine {
     /// Fenêtre d'auto-détection ouverte par "You send your pet in for the attack!".
     pet_window_until: Option<u64>,
     /// Joueurs vus dans le chat (`\aPC`) : jamais des pets.
-    pub known_players: std::collections::HashSet<String>,
+    pub known_players: HashSet<String>,
+    /// Derniers coups encaissés par entité (fenêtre glissante ~15 s) — death report.
+    recent_hits: HashMap<String, VecDeque<RecentHit>>,
 }
 
 impl CombatEngine {
@@ -243,7 +378,21 @@ impl CombatEngine {
             self_name: String::new(),
             auto_pets: HashMap::new(),
             pet_window_until: None,
-            known_players: std::collections::HashSet::new(),
+            known_players: HashSet::new(),
+            recent_hits: HashMap::new(),
+        }
+    }
+
+    /// Enregistre un coup encaissé dans la fenêtre glissante du death report.
+    fn push_recent_hit(&mut self, target: &str, hit: RecentHit) {
+        let epoch = hit.epoch;
+        let q = self.recent_hits.entry(target.to_string()).or_default();
+        q.push_back(hit);
+        while q
+            .front()
+            .is_some_and(|h| h.epoch + 15 < epoch || q.len() > 60)
+        {
+            q.pop_front();
         }
     }
 
@@ -251,7 +400,13 @@ impl CombatEngine {
         if let Some(mut enc) = self.current.take() {
             enc.finished = true;
             // On ne garde pas les "encounters" sans aucun dégât (buffs hors combat…)
-            if enc.total_damage() > 0 {
+            // et on déduplique (ré-import d'un log déjà en historique).
+            let duplicate = self.history.iter().any(|e| {
+                e.start == enc.start
+                    && e.end == enc.end
+                    && e.total_damage() == enc.total_damage()
+            });
+            if enc.total_damage() > 0 && !duplicate {
                 self.history.push(enc);
             }
         }
@@ -316,8 +471,21 @@ impl CombatEngine {
                         self.pet_window_until = None;
                     }
                 }
+                self.push_recent_hit(
+                    target,
+                    RecentHit {
+                        epoch,
+                        attacker: attacker.clone(),
+                        ability: ability.clone(),
+                        amount: *amount,
+                    },
+                );
                 let enc = self.ensure_encounter(epoch);
                 enc.end = epoch;
+                enc.attacks
+                    .entry(attacker.clone())
+                    .or_default()
+                    .insert(target.clone());
                 {
                     let a = enc.combatants.entry(attacker.clone()).or_default();
                     a.damage += amount;
@@ -344,15 +512,23 @@ impl CombatEngine {
             LogEvent::FailedHit { attacker, target } => {
                 let enc = self.ensure_encounter(epoch);
                 enc.end = epoch;
+                enc.attacks
+                    .entry(attacker.clone())
+                    .or_default()
+                    .insert(target.clone());
                 let a = enc.combatants.entry(attacker.clone()).or_default();
                 a.hits += 1;
                 enc.combatants.entry(target.clone()).or_default();
             }
-            LogEvent::Miss { attacker, .. } => {
+            LogEvent::Miss { attacker, target, .. } => {
                 // Ne démarre pas un encounter à lui seul, mais compte si combat en cours.
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
                         enc.end = epoch;
+                        enc.attacks
+                            .entry(attacker.clone())
+                            .or_default()
+                            .insert(target.clone());
                         let a = enc.combatants.entry(attacker.clone()).or_default();
                         a.misses += 1;
                     }
@@ -362,6 +538,10 @@ impl CombatEngine {
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
                         enc.end = epoch;
+                        enc.assists
+                            .entry(healer.clone())
+                            .or_default()
+                            .insert(target.clone());
                         let h = enc.combatants.entry(healer.clone()).or_default();
                         h.healing += amount;
                         if *crit {
@@ -390,6 +570,10 @@ impl CombatEngine {
                             .get(ability)
                             .cloned()
                             .unwrap_or_else(|| format!("({ability})"));
+                        enc.assists
+                            .entry(owner.clone())
+                            .or_default()
+                            .insert(target.clone());
                         let o = enc.combatants.entry(owner).or_default();
                         o.healing += amount;
                         let ab = o.abilities.entry(format!("{ability} (ward)")).or_default();
@@ -421,16 +605,38 @@ impl CombatEngine {
                     }
                 }
             }
-            LogEvent::Slain { victim, .. } => {
+            LogEvent::Slain { victim, killer } => {
+                // Rapport de mort : les coups encaissés dans les 12 dernières secondes.
+                let hits: Vec<RecentHit> = self
+                    .recent_hits
+                    .get(victim)
+                    .map(|q| {
+                        q.iter()
+                            .filter(|h| h.epoch + 12 >= epoch)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if let Some(enc) = self.current.as_mut() {
                     enc.end = epoch;
+                    enc.deaths_log.push(DeathRecord {
+                        epoch,
+                        victim: victim.clone(),
+                        killer: killer.clone(),
+                        hits,
+                    });
                     let v = enc.combatants.entry(victim.clone()).or_default();
                     v.deaths += 1;
                 }
+                self.recent_hits.remove(victim);
             }
             LogEvent::PowerRefresh { source, ability, target, amount, crit } => {
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
+                        enc.assists
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(target.clone());
                         let s = enc.combatants.entry(source.clone()).or_default();
                         s.power += amount;
                         if *crit {
@@ -455,6 +661,15 @@ impl CombatEngine {
                 self.known_players.insert(name.clone());
             }
             LogEvent::EnvDamage { target, amount } => {
+                self.push_recent_hit(
+                    target,
+                    RecentHit {
+                        epoch,
+                        attacker: "(environnement)".into(),
+                        ability: None,
+                        amount: *amount,
+                    },
+                );
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
                         let t = enc.combatants.entry(target.clone()).or_default();
@@ -625,6 +840,75 @@ mod tests {
             ],
         );
         assert!(engine.auto_pets.is_empty());
+    }
+
+    #[test]
+    fn faction_inference() {
+        let parser = Parser::new("Tank");
+        let mut engine = CombatEngine::new(6);
+        engine.self_name = "Tank".into();
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                // Le tank engage le boss (mob nommé, capitalisé !)
+                "(1000)[Tue May 26 17:42:26 2026] YOU hit Holly Windstalker for 100 crushing damage.",
+                // Le boss tape le tank
+                "(1001)[Tue May 26 17:42:27 2026] Holly Windstalker hits Tank for 500 crushing damage.",
+                // Un DPS inconnu tape le boss → allié (attaque un ennemi)
+                "(1002)[Tue May 26 17:42:28 2026] Wizzy's Fusion hits Holly Windstalker for 9,000 heat damage.",
+                // Un soigneur soigne le tank → allié (soigne un allié)
+                "(1003)[Tue May 26 17:42:29 2026] Healerguy's Salve heals Tank for 300 hit points.",
+                // Un add article-minuscule tape le soigneur → ennemi
+                "(1004)[Tue May 26 17:42:30 2026] a winged terror hits Healerguy for 50 crushing damage.",
+            ],
+        );
+        let enc = engine.current.as_ref().unwrap();
+        let allies = compute_allies(enc, "Tank", &engine.known_players, &HashMap::new());
+        assert!(allies.contains("Tank"));
+        assert!(allies.contains("Wizzy"));
+        assert!(allies.contains("Healerguy"));
+        // Le boss nommé/capitalisé est bien classé ennemi malgré son nom de PJ.
+        assert!(!allies.contains("Holly Windstalker"));
+        assert!(!allies.contains("a winged terror"));
+
+        // Les classements filtrés ne montrent que les alliés.
+        let mut display = enc.clone();
+        display.allies = Some(allies);
+        let names: Vec<&str> = display
+            .damage_ranking()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(names, vec!["Wizzy", "Tank"]);
+    }
+
+    #[test]
+    fn death_report_records_recent_hits() {
+        let parser = Parser::new("Tank");
+        let mut engine = CombatEngine::new(10);
+        engine.self_name = "Tank".into();
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                "(1000)[Tue May 26 17:42:26 2026] a dragon hits Tank for 1,000 crushing damage.",
+                // Vieux coup (> 12 s avant la mort) : exclu du rapport
+                "(1002)[Tue May 26 17:42:28 2026] a dragon's Tail Swipe hits Tank for 2,000 crushing damage.",
+                "(1015)[Tue May 26 17:42:41 2026] a dragon's Flame Breath hits Tank for 5,000 heat damage.",
+                "(1016)[Tue May 26 17:42:42 2026] Tank has been slain by a dragon!",
+            ],
+        );
+        let enc = engine.current.as_ref().unwrap();
+        assert_eq!(enc.deaths_log.len(), 1);
+        let d = &enc.deaths_log[0];
+        assert_eq!(d.victim, "Tank");
+        assert_eq!(d.killer, "a dragon");
+        // Seul le coup à -1 s est dans la fenêtre de 12 s.
+        assert_eq!(d.hits.len(), 1);
+        assert_eq!(d.hits[0].amount, 5000);
+        assert_eq!(d.hits[0].ability.as_deref(), Some("Flame Breath"));
+        assert_eq!(enc.combatants["Tank"].deaths, 1);
     }
 
     #[test]

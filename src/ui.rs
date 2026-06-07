@@ -112,6 +112,11 @@ pub struct App {
     compare_pin: Option<usize>,
     /// Screenshot en attente pour l'export PNG du graphe.
     awaiting_screenshot: bool,
+    /// Serveur du log suivi (pour le fichier d'historique).
+    current_server: String,
+    /// Auto-sauvegarde de l'historique : état au dernier save.
+    last_hist_len: usize,
+    last_hist_save: Instant,
 }
 
 impl App {
@@ -137,6 +142,9 @@ impl App {
             copied_at: None,
             compare_pin: None,
             awaiting_screenshot: false,
+            current_server: String::new(),
+            last_hist_len: 0,
+            last_hist_save: Instant::now(),
         };
         // Réattache automatiquement le dernier log suivi.
         if let Some(last) = app.config.last_log.clone() {
@@ -148,7 +156,16 @@ impl App {
     }
 
     fn attach(&mut self, path: PathBuf, ctx: egui::Context) {
+        // Sauvegarde l'historique du personnage précédent avant de changer.
+        self.save_history();
+
         let name = char_name_from_path(&path).unwrap_or_else(|| "You".into());
+        let server = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
         self.parser = Some(Parser::new(name.clone()));
         let (tx, rx) = std::sync::mpsc::channel();
         self.tailer = Some(Tailer::start(
@@ -159,12 +176,34 @@ impl App {
         ));
         self.rx = Some(rx);
         self.engine = CombatEngine::new(self.config.encounter_timeout);
-        self.engine.self_name = name;
+        self.engine.self_name = name.clone();
+        // Recharge l'historique persisté de ce personnage.
+        if self.config.persist_history {
+            self.engine.history = crate::history::load(&server, &name);
+        }
+        self.current_server = server;
+        self.last_hist_len = self.engine.history.len();
         self.lines_seen = 0;
         self.selected_encounter = None;
         self.selected_combatant = None;
+        self.compare_pin = None;
         self.config.last_log = Some(path);
         self.config.save();
+    }
+
+    fn save_history(&mut self) {
+        if !self.config.persist_history || self.current_server.is_empty() {
+            return;
+        }
+        let Some(name) = self.self_name().map(|s| s.to_string()) else { return };
+        crate::history::save(
+            &self.current_server,
+            &name,
+            &self.engine.history,
+            self.config.history_cap,
+        );
+        self.last_hist_len = self.engine.history.len();
+        self.last_hist_save = Instant::now();
     }
 
     fn drain_lines(&mut self) {
@@ -204,13 +243,24 @@ impl App {
         owners
     }
 
-    /// Encounter prêt pour l'affichage (pets fusionnés si activé).
+    /// Encounter prêt pour l'affichage : pets fusionnés + filtre alliés/ennemis.
     fn for_display(&self, enc: &Encounter) -> Encounter {
-        if self.config.merge_pets {
-            enc.merged(&self.effective_owners())
+        let owners = self.effective_owners();
+        let mut out = if self.config.merge_pets {
+            enc.merged(&owners)
         } else {
             enc.clone()
+        };
+        if !self.config.show_enemies {
+            // Calculé sur l'encounter brut (les arêtes y référencent les pets).
+            out.allies = Some(crate::combat::compute_allies(
+                enc,
+                &self.engine.self_name,
+                &self.engine.known_players,
+                &owners,
+            ));
         }
+        out
     }
 
     /// Détail d'un encounter : tables, breakdown, comparaison, graphe.
@@ -230,6 +280,23 @@ impl App {
                 ui.separator();
                 ability_breakdown(ui, enc, &name);
             }
+            // Rapports de mort (alliés uniquement, sauf si les ennemis sont affichés).
+            let deaths: Vec<&crate::combat::DeathRecord> = enc
+                .deaths_log
+                .iter()
+                .filter(|d| enc.visible(&d.victim) || enc.allies.is_none())
+                .collect();
+            if !deaths.is_empty() {
+                ui.separator();
+                egui::CollapsingHeader::new(format!("💀 Morts ({})", deaths.len()))
+                    .default_open(deaths.len() <= 3)
+                    .show(ui, |ui| {
+                        for (di, d) in deaths.iter().enumerate() {
+                            death_report(ui, enc, d, di);
+                        }
+                    });
+            }
+
             if let Some(p) = &pinned {
                 ui.separator();
                 egui::CollapsingHeader::new(format!(
@@ -296,12 +363,20 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_history();
         self.config.save();
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_lines();
         self.engine.tick(Self::now_epoch());
+
+        // Auto-sauvegarde de l'historique : nouveaux encounters + throttle 20 s.
+        if self.engine.history.len() != self.last_hist_len
+            && self.last_hist_save.elapsed() > Duration::from_secs(20)
+        {
+            self.save_history();
+        }
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -629,6 +704,59 @@ impl App {
             .changed()
         {
             self.engine.timeout = self.config.encounter_timeout;
+            self.config.save();
+        }
+        if ui
+            .checkbox(
+                &mut self.config.show_enemies,
+                "Afficher les ennemis (mobs) dans les classements",
+            )
+            .on_hover_text(
+                "Par défaut, seuls les alliés apparaissent (inférence : qui attaque qui, \
+                 qui soigne qui).",
+            )
+            .changed()
+        {
+            self.config.save();
+        }
+
+        ui.separator();
+        ui.heading("Historique");
+        let mut hist_changed = false;
+        hist_changed |= ui
+            .checkbox(
+                &mut self.config.persist_history,
+                "Sauvegarder l'historique sur disque (rechargé au lancement)",
+            )
+            .changed();
+        hist_changed |= ui
+            .add(
+                egui::Slider::new(&mut self.config.history_cap, 50..=2000)
+                    .text("Encounters conservés max"),
+            )
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} encounters en mémoire — fichier : history\\{}_{}.json",
+                    self.engine.history.len(),
+                    self.current_server,
+                    self.self_name().unwrap_or("?")
+                ))
+                .weak()
+                .small(),
+            );
+            if ui.small_button("💾 Sauvegarder maintenant").clicked() {
+                self.save_history();
+            }
+            if ui.small_button("🗑 Vider l'historique").clicked() {
+                self.engine.history.clear();
+                self.save_history();
+                self.selected_encounter = None;
+                self.compare_pin = None;
+            }
+        });
+        if hist_changed {
             self.config.save();
         }
 
@@ -1189,7 +1317,7 @@ fn graph_section(
             let mut candidates: Vec<(&String, &crate::combat::Combatant)> = enc
                 .combatants
                 .iter()
-                .filter(|(_, c)| metric_total(c, state.metric) > 0)
+                .filter(|(n, c)| metric_total(c, state.metric) > 0 && enc.visible(n))
                 .collect();
             candidates.sort_by_key(|(_, c)| std::cmp::Reverse(metric_total(c, state.metric)));
 
@@ -1245,7 +1373,7 @@ fn graph_section(
                     let mut pcand: Vec<(&String, &crate::combat::Combatant)> = p
                         .combatants
                         .iter()
-                        .filter(|(_, c)| metric_total(c, state.metric) > 0)
+                        .filter(|(n, c)| metric_total(c, state.metric) > 0 && p.visible(n))
                         .collect();
                     pcand.sort_by_key(|(_, c)| {
                         std::cmp::Reverse(metric_total(c, state.metric))
@@ -1356,6 +1484,72 @@ fn graph_section(
             }
         });
     state.last_plot_rect = Some(resp.response.rect);
+}
+
+/// Rapport de mort : qui, quand, par qui, avec les derniers coups encaissés.
+fn death_report(ui: &mut egui::Ui, enc: &Encounter, d: &crate::combat::DeathRecord, idx: usize) {
+    use egui_extras::{Column, TableBuilder};
+    let offset = d.epoch.saturating_sub(enc.start);
+    let total: u64 = d.hits.iter().map(|h| h.amount).sum();
+    egui::CollapsingHeader::new(format!(
+        "💀 {} — t+{} — tué par {} ({} encaissés en {} s)",
+        d.victim,
+        fmt_duration(offset),
+        d.killer,
+        fmt_num(total),
+        12
+    ))
+    .id_salt(("death", idx))
+    .default_open(deaths_default_open(enc))
+    .show(ui, |ui| {
+        TableBuilder::new(ui)
+            .id_salt(("death_table", idx))
+            .striped(true)
+            .column(Column::auto().at_least(60.0))
+            .column(Column::auto().at_least(160.0))
+            .column(Column::auto().at_least(200.0))
+            .column(Column::auto().at_least(80.0))
+            .column(Column::remainder())
+            .header(18.0, |mut h| {
+                for t in ["t", "Attaquant", "Sort / CA", "Dégâts", ""] {
+                    h.col(|ui| {
+                        ui.label(RichText::new(t).strong());
+                    });
+                }
+            })
+            .body(|mut body| {
+                for hit in &d.hits {
+                    body.row(17.0, |mut row| {
+                        row.col(|ui| {
+                            let dt = d.epoch.saturating_sub(hit.epoch);
+                            ui.label(if dt == 0 {
+                                "mort".to_string()
+                            } else {
+                                format!("-{dt} s")
+                            });
+                        });
+                        row.col(|ui| {
+                            ui.label(&hit.attacker);
+                        });
+                        row.col(|ui| {
+                            ui.label(hit.ability.as_deref().unwrap_or("(auto-attack)"));
+                        });
+                        row.col(|ui| {
+                            ui.label(
+                                RichText::new(fmt_num(hit.amount))
+                                    .color(Color32::from_rgb(231, 76, 60)),
+                            );
+                        });
+                        row.col(|_| {});
+                    });
+                }
+            });
+    });
+}
+
+/// Ouvre le détail par défaut quand il n'y a qu'une ou deux morts.
+fn deaths_default_open(enc: &Encounter) -> bool {
+    enc.deaths_log.len() <= 2
 }
 
 /// Table de comparaison : encounter épinglé (A) vs affiché (B).

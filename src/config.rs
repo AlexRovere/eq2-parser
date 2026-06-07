@@ -44,6 +44,12 @@ pub struct Config {
     pub triggers: Vec<Trigger>,
     /// Fusionner les pets dans leur propriétaire à l'affichage.
     pub merge_pets: bool,
+    /// Afficher aussi les ennemis (mobs) dans les classements.
+    pub show_enemies: bool,
+    /// Sauvegarder l'historique des encounters sur disque.
+    pub persist_history: bool,
+    /// Nombre max d'encounters conservés par personnage.
+    pub history_cap: usize,
     /// Assignations manuelles : pet → propriétaire (prioritaires sur l'auto-détection).
     pub pet_assignments: HashMap<String, String>,
 }
@@ -72,6 +78,9 @@ impl Default for Config {
             overlay_text_top: true,
             triggers: Vec::new(),
             merge_pets: true,
+            show_enemies: false,
+            persist_history: true,
+            history_cap: 500,
             pet_assignments: HashMap::new(),
         }
     }

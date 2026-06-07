@@ -3,6 +3,7 @@
 mod combat;
 mod config;
 mod export;
+mod history;
 mod parser;
 mod tailer;
 mod template;
