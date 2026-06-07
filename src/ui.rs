@@ -117,6 +117,8 @@ pub struct App {
     /// Auto-sauvegarde de l'historique : état au dernier save.
     last_hist_len: usize,
     last_hist_save: Instant,
+    /// Dernier scan du répertoire de logs (suivi auto du perso actif).
+    last_log_scan: Instant,
     /// Tri par table : id → (colonne, descendant).
     sort_states: HashMap<&'static str, (usize, bool)>,
     /// Filtres texte.
@@ -145,10 +147,18 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let config = Config::load();
+        let mut config = Config::load();
         let trigger_engine = TriggerEngine::new(&config.triggers);
         let engine = CombatEngine::new(config.encounter_timeout);
-        let available_logs = discover_logs(&config.logs_dir);
+        // Premier lancement / mauvais chemin : détecte le répertoire EQ2.
+        let mut available_logs = discover_logs(&config.logs_dir);
+        if available_logs.is_empty() {
+            if let Some(dir) = crate::tailer::detect_logs_dir() {
+                config.logs_dir = dir;
+                config.save();
+                available_logs = discover_logs(&config.logs_dir);
+            }
+        }
         // Auto-update : nettoie l'ancien exe et vérifie les releases GitHub.
         crate::update::cleanup_old();
         let (update_tx, update_rx) = std::sync::mpsc::channel();
@@ -175,6 +185,7 @@ impl App {
             current_server: String::new(),
             last_hist_len: 0,
             last_hist_save: Instant::now(),
+            last_log_scan: Instant::now(),
             sort_states: HashMap::new(),
             filter_combatant: String::new(),
             filter_ability: String::new(),
@@ -192,8 +203,13 @@ impl App {
             update_error: None,
             updating: false,
         };
-        // Réattache automatiquement le dernier log suivi.
-        if let Some(last) = app.config.last_log.clone() {
+        // Attache automatique : le log le plus récemment écrit (perso actif),
+        // sinon le dernier log suivi.
+        if app.config.auto_attach_latest {
+            if let Some(latest) = app.available_logs.first().cloned() {
+                app.attach(latest, cc.egui_ctx.clone());
+            }
+        } else if let Some(last) = app.config.last_log.clone() {
             if last.exists() {
                 app.attach(last, cc.egui_ctx.clone());
             }
@@ -515,6 +531,43 @@ impl eframe::App for App {
             && self.last_hist_save.elapsed() > Duration::from_secs(20)
         {
             self.save_history();
+        }
+
+        // Suivi auto du perso actif : si un autre log devient nettement plus
+        // récent (relog sur un autre personnage), on bascule dessus.
+        if self.config.auto_attach_latest
+            && self.last_log_scan.elapsed() > Duration::from_secs(15)
+        {
+            self.last_log_scan = Instant::now();
+            self.available_logs = discover_logs(&self.config.logs_dir);
+            if let Some(latest) = self.available_logs.first().cloned() {
+                let current = self.tailer.as_ref().map(|t| t.path.clone());
+                let should_switch = match &current {
+                    None => true,
+                    Some(cur) if cur != &latest => {
+                        let mtime = |p: &PathBuf| {
+                            std::fs::metadata(p).and_then(|m| m.modified()).ok()
+                        };
+                        match (mtime(&latest), mtime(cur)) {
+                            // Bascule seulement si l'autre log a > 60 s d'avance,
+                            // pour ne pas osciller entre deux logs actifs.
+                            (Some(l), Some(c)) => {
+                                l > c + Duration::from_secs(60)
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if should_switch {
+                    let name = char_name_from_path(&latest).unwrap_or_default();
+                    self.attach(latest, ctx.clone());
+                    self.trigger_engine.toasts.push(crate::triggers::Toast {
+                        text: format!("Suivi auto : {name}"),
+                        created: Instant::now(),
+                    });
+                }
+            }
         }
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
@@ -1053,12 +1106,59 @@ impl App {
             if ui.button("🔄 Rafraîchir").clicked() {
                 self.available_logs = discover_logs(&self.config.logs_dir);
             }
+            if ui
+                .button("🔍 Détecter")
+                .on_hover_text(
+                    "Cherche l'installation EQ2 : bibliothèques Steam \
+                     (libraryfolders.vdf) et chemins usuels sur tous les disques.",
+                )
+                .clicked()
+            {
+                match crate::tailer::detect_logs_dir() {
+                    Some(dir) => {
+                        self.config.logs_dir = dir;
+                        self.available_logs = discover_logs(&self.config.logs_dir);
+                        self.config.save();
+                    }
+                    None => {
+                        self.trigger_engine.toasts.push(crate::triggers::Toast {
+                            text: "Installation EQ2 introuvable — choisis le dossier \
+                                   logs manuellement (📂)"
+                                .into(),
+                            created: Instant::now(),
+                        });
+                    }
+                }
+            }
         });
+        if self.available_logs.is_empty() {
+            ui.label(
+                RichText::new(
+                    "⚠ Aucun log trouvé. En jeu, tape /log pour activer le logging \
+                     (le fichier apparaît dans <EverQuest 2>\\logs\\<Serveur>\\).",
+                )
+                .color(Color32::from_rgb(241, 196, 15)),
+            );
+        }
 
         ui.checkbox(
             &mut self.config.import_existing,
             "Relire tout le fichier à l'attache (import de l'historique)",
         );
+        if ui
+            .checkbox(
+                &mut self.config.auto_attach_latest,
+                "Suivre automatiquement le perso actif (le log le plus récent)",
+            )
+            .on_hover_text(
+                "Au lancement et en continu : si un autre log devient le plus récent \
+                 (relog sur un autre perso), l'app bascule dessus toute seule. \
+                 Décoche pour figer le choix manuel.",
+            )
+            .changed()
+        {
+            self.config.save();
+        }
 
         ui.add_space(6.0);
         ui.label("Personnages détectés (du plus récent au plus ancien) :");
@@ -2516,7 +2616,8 @@ impl App {
         let bar_format = cfg.overlay_bar_format.trim().to_string();
         let mut sections: Vec<OverlaySection> = Vec::new();
         if let Some(e) = &enc {
-            let mk = |ranking: Vec<(&String, &crate::combat::Combatant)>,
+            let mk = |label: &'static str,
+                      ranking: Vec<(&String, &crate::combat::Combatant)>,
                       per_sec: &dyn Fn(&crate::combat::Combatant) -> f64,
                       total: &dyn Fn(&crate::combat::Combatant) -> u64|
              -> Vec<(usize, String, String, f32, bool)> {
@@ -2525,7 +2626,7 @@ impl App {
                 let mk_row = |rank: usize, n: &String, c: &crate::combat::Combatant| {
                     let value = if bar_format.is_empty() {
                         format!(
-                            "{}  ({} · {:.1}%)",
+                            "{label}: {} (Total: {} - {:.1}%)",
                             fmt_f64(per_sec(c)),
                             fmt_num(total(c)),
                             total(c) as f64 / sec_total as f64 * 100.0
@@ -2565,19 +2666,19 @@ impl App {
             if cfg.overlay_show_dps {
                 sections.push(OverlaySection {
                     label: "DPS",
-                    rows: mk(e.damage_ranking(), &|c| e.dps_of(c), &|c| c.damage),
+                    rows: mk("DPS", e.damage_ranking(), &|c| e.dps_of(c), &|c| c.damage),
                 });
             }
             if cfg.overlay_show_hps {
                 sections.push(OverlaySection {
                     label: "HPS",
-                    rows: mk(e.heal_ranking(), &|c| e.hps_of(c), &|c| c.healing),
+                    rows: mk("HPS", e.heal_ranking(), &|c| e.hps_of(c), &|c| c.healing),
                 });
             }
             if cfg.overlay_show_power {
                 sections.push(OverlaySection {
                     label: "Power",
-                    rows: mk(e.power_ranking(), &|c| e.pps_of(c), &|c| c.power),
+                    rows: mk("Power", e.power_ranking(), &|c| e.pps_of(c), &|c| c.power),
                 });
             }
             sections.retain(|sec| !sec.rows.is_empty());

@@ -16,6 +16,8 @@ pub struct Config {
     pub encounter_timeout: u64,
     /// Relire tout le fichier à l'attache (import historique).
     pub import_existing: bool,
+    /// Suivre automatiquement le log le plus récemment écrit (le perso actif).
+    pub auto_attach_latest: bool,
     pub overlay_enabled: bool,
     pub overlay_opacity: f32,
     pub overlay_click_through: bool,
@@ -70,6 +72,7 @@ impl Default for Config {
             last_log: None,
             encounter_timeout: 6,
             import_existing: false,
+            auto_attach_latest: true,
             overlay_enabled: true,
             overlay_opacity: 0.85,
             overlay_click_through: false,

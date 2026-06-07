@@ -109,6 +109,58 @@ fn tail_loop(
     }
 }
 
+/// Cherche automatiquement le répertoire `logs` d'EverQuest II :
+/// bibliothèques Steam (libraryfolders.vdf), chemins Steam/Daybreak usuels
+/// sur tous les disques. Préfère un répertoire contenant déjà des logs.
+pub fn detect_logs_dir() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Bibliothèques Steam déclarées dans libraryfolders.vdf.
+    for steam_root in [
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files\Steam",
+    ] {
+        let vdf = std::path::Path::new(steam_root).join(r"steamapps\libraryfolders.vdf");
+        if let Ok(s) = std::fs::read_to_string(&vdf) {
+            for line in s.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("\"path\"") {
+                    let p = rest.trim().trim_matches('"').replace("\\\\", "\\");
+                    candidates.push(
+                        PathBuf::from(p).join(r"steamapps\common\EverQuest 2\logs"),
+                    );
+                }
+            }
+        }
+        candidates.push(
+            std::path::Path::new(steam_root).join(r"steamapps\common\EverQuest 2\logs"),
+        );
+    }
+
+    // Emplacements usuels sur tous les disques.
+    for drive in b'C'..=b'Z' {
+        let d = drive as char;
+        for sub in [
+            r"Steam\steamapps\common\EverQuest 2\logs",
+            r"SteamLibrary\steamapps\common\EverQuest 2\logs",
+            r"Games\Steam\steamapps\common\EverQuest 2\logs",
+            r"jeux\steam\steamapps\common\EverQuest 2\logs",
+            r"Program Files (x86)\Daybreak Game Company\Installed Games\EverQuest II\logs",
+            r"Users\Public\Daybreak Game Company\Installed Games\EverQuest II\logs",
+        ] {
+            candidates.push(PathBuf::from(format!("{d}:\\{sub}")));
+        }
+    }
+
+    // 1er choix : un répertoire qui contient déjà des logs ;
+    // sinon un répertoire qui existe (le joueur n'a pas encore fait /log).
+    candidates
+        .iter()
+        .find(|p| p.is_dir() && !discover_logs(p).is_empty())
+        .or_else(|| candidates.iter().find(|p| p.is_dir()))
+        .cloned()
+}
+
 /// Liste les fichiers `eq2log_*.txt` d'un répertoire logs EQ2 (récursif, 1 niveau serveur),
 /// triés du plus récent au plus ancien.
 pub fn discover_logs(logs_dir: &std::path::Path) -> Vec<PathBuf> {
