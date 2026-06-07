@@ -52,6 +52,14 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
   named capitalisés. Option pour tout afficher.
 - **Death report** : pour chaque mort, qui / quand / tué par qui + la table des
   coups encaissés dans les 12 dernières secondes.
+- **Session & zones** : pseudo-encounter « Σ Session entière » qui cumule tous les
+  combats (graphes inclus), historique groupé par zone (`You have entered…`).
+- **Détail par cible** : dégâts ventilés par mob, dégâts reçus par attaquant
+  (vue tank), matrice de soins (donnés par bénéficiaire / reçus par soigneur),
+  évitements (parade/riposte/esquive/bloc) et précision.
+- **Log brut** : les lignes sources de chaque combat de la session, filtrables.
+- **Profils d'overlay** : enregistre des configurations nommées (raid compact,
+  solo détaillé…) et commute en un clic depuis le menu clic droit.
 
 Voir [ROADMAP.md](ROADMAP.md) pour les features restantes vs ACT (triggers TTS/timers,
 spell timers, agrégat de session, détail par cible…).

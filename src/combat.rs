@@ -55,6 +55,18 @@ pub struct Combatant {
     pub heal_series: BTreeMap<u64, u64>,
     pub taken_series: BTreeMap<u64, u64>,
     pub power_series: BTreeMap<u64, u64>,
+    /// Détail par cible : mes dégâts ventilés par victime.
+    pub damage_by_target: BTreeMap<String, u64>,
+    /// Vue tank : dégâts reçus ventilés par attaquant.
+    pub taken_by_attacker: BTreeMap<String, u64>,
+    /// Matrice de soins : mes soins ventilés par bénéficiaire.
+    pub heals_by_target: BTreeMap<String, u64>,
+    /// Soins reçus, ventilés par soigneur.
+    pub heals_received_from: BTreeMap<String, u64>,
+    /// Mes attaques évitées par l'adversaire, par type (parade, esquive…).
+    pub misses_by_kind: BTreeMap<String, u32>,
+    /// Attaques adverses que J'AI évitées, par type.
+    pub avoids_by_kind: BTreeMap<String, u32>,
 }
 
 impl Combatant {
@@ -98,6 +110,83 @@ impl Combatant {
         for (t, v) in &other.power_series {
             *self.power_series.entry(*t).or_default() += v;
         }
+        for (k, v) in &other.damage_by_target {
+            *self.damage_by_target.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.taken_by_attacker {
+            *self.taken_by_attacker.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.heals_by_target {
+            *self.heals_by_target.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.heals_received_from {
+            *self.heals_received_from.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.misses_by_kind {
+            *self.misses_by_kind.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.avoids_by_kind {
+            *self.avoids_by_kind.entry(k.clone()).or_default() += v;
+        }
+    }
+
+    /// Fusionne `other` tel quel (agrégat de session), avec remapping temporel
+    /// des séries pour concaténer les combats bout à bout.
+    fn fold_remap(&mut self, other: &Combatant, remap: &dyn Fn(u64) -> u64) {
+        self.damage += other.damage;
+        self.healing += other.healing;
+        self.power += other.power;
+        self.damage_taken += other.damage_taken;
+        self.heal_received += other.heal_received;
+        self.hits += other.hits;
+        self.crits += other.crits;
+        self.misses += other.misses;
+        self.max_hit = self.max_hit.max(other.max_hit);
+        self.deaths += other.deaths;
+        self.kills += other.kills;
+        self.threat += other.threat;
+        for (ab, st) in &other.abilities {
+            let dst = self.abilities.entry(ab.clone()).or_default();
+            dst.damage += st.damage;
+            dst.healing += st.healing;
+            dst.power += st.power;
+            dst.hits += st.hits;
+            dst.crits += st.crits;
+            dst.max_hit = dst.max_hit.max(st.max_hit);
+            for (t, v) in &st.series {
+                *dst.series.entry(remap(*t)).or_default() += v;
+            }
+        }
+        for (t, v) in &other.dmg_series {
+            *self.dmg_series.entry(remap(*t)).or_default() += v;
+        }
+        for (t, v) in &other.heal_series {
+            *self.heal_series.entry(remap(*t)).or_default() += v;
+        }
+        for (t, v) in &other.taken_series {
+            *self.taken_series.entry(remap(*t)).or_default() += v;
+        }
+        for (t, v) in &other.power_series {
+            *self.power_series.entry(remap(*t)).or_default() += v;
+        }
+        for (k, v) in &other.damage_by_target {
+            *self.damage_by_target.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.taken_by_attacker {
+            *self.taken_by_attacker.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.heals_by_target {
+            *self.heals_by_target.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.heals_received_from {
+            *self.heals_received_from.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.misses_by_kind {
+            *self.misses_by_kind.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.avoids_by_kind {
+            *self.avoids_by_kind.entry(k.clone()).or_default() += v;
+        }
     }
 }
 
@@ -133,6 +222,11 @@ pub struct Encounter {
     pub assists: BTreeMap<String, BTreeSet<String>>,
     /// Rapports de mort (avec les derniers coups encaissés).
     pub deaths_log: Vec<DeathRecord>,
+    /// Zone où le combat a eu lieu (`You have entered <Zone>.`).
+    pub zone: String,
+    /// Lignes brutes du combat (session courante uniquement, non persisté).
+    #[serde(skip)]
+    pub raw_lines: Vec<(u64, String)>,
     /// Ensemble des alliés, calculé à l'affichage (non persisté).
     /// `None` = pas de filtre, tout le monde est visible.
     #[serde(skip)]
@@ -156,6 +250,8 @@ impl Encounter {
             attacks: BTreeMap::new(),
             assists: BTreeMap::new(),
             deaths_log: Vec::new(),
+            zone: String::new(),
+            raw_lines: Vec::new(),
             allies: None,
         }
     }
@@ -242,6 +338,8 @@ impl Encounter {
             attacks: self.attacks.clone(),
             assists: self.assists.clone(),
             deaths_log: self.deaths_log.clone(),
+            zone: self.zone.clone(),
+            raw_lines: self.raw_lines.clone(),
             allies: self.allies.clone(),
         };
         // D'abord les non-pets (pour que le propriétaire existe), puis les pets.
@@ -366,6 +464,8 @@ pub struct CombatEngine {
     pub known_players: HashSet<String>,
     /// Derniers coups encaissés par entité (fenêtre glissante ~15 s) — death report.
     recent_hits: HashMap<String, VecDeque<RecentHit>>,
+    /// Zone courante (`You have entered <Zone>.`).
+    pub current_zone: String,
 }
 
 impl CombatEngine {
@@ -380,6 +480,7 @@ impl CombatEngine {
             pet_window_until: None,
             known_players: HashSet::new(),
             recent_hits: HashMap::new(),
+            current_zone: String::new(),
         }
     }
 
@@ -433,14 +534,25 @@ impl CombatEngine {
             self.close_current();
         }
         if self.current.is_none() {
-            self.current = Some(Encounter::new(epoch));
+            let mut enc = Encounter::new(epoch);
+            enc.zone = self.current_zone.clone();
+            self.current = Some(enc);
         }
         self.current.as_mut().unwrap()
     }
 
     pub fn process(&mut self, line: &ParsedLine) {
-        let Some(event) = &line.event else { return };
         let epoch = line.epoch;
+        let Some(event) = &line.event else {
+            // Pas d'événement combat : on garde quand même la ligne dans le
+            // log brut du combat en cours (chat, emotes…).
+            if let Some(enc) = self.current.as_mut() {
+                if epoch <= enc.end + self.timeout && enc.raw_lines.len() < 5000 {
+                    enc.raw_lines.push((epoch, line.message.clone()));
+                }
+            }
+            return;
+        };
 
         match event {
             LogEvent::Damage { attacker, ability, target, amount, crit, .. } => {
@@ -494,6 +606,7 @@ impl CombatEngine {
                         a.crits += 1;
                     }
                     a.max_hit = a.max_hit.max(*amount);
+                    *a.damage_by_target.entry(target.clone()).or_default() += amount;
                     let key = ability.clone().unwrap_or_else(|| "(auto-attack)".into());
                     let ab = a.abilities.entry(key).or_default();
                     ab.damage += amount;
@@ -508,6 +621,7 @@ impl CombatEngine {
                 let t = enc.combatants.entry(target.clone()).or_default();
                 t.damage_taken += amount;
                 *t.taken_series.entry(epoch).or_default() += amount;
+                *t.taken_by_attacker.entry(attacker.clone()).or_default() += amount;
             }
             LogEvent::FailedHit { attacker, target } => {
                 let enc = self.ensure_encounter(epoch);
@@ -520,7 +634,7 @@ impl CombatEngine {
                 a.hits += 1;
                 enc.combatants.entry(target.clone()).or_default();
             }
-            LogEvent::Miss { attacker, target, .. } => {
+            LogEvent::Miss { attacker, target, kind } => {
                 // Ne démarre pas un encounter à lui seul, mais compte si combat en cours.
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
@@ -531,6 +645,9 @@ impl CombatEngine {
                             .insert(target.clone());
                         let a = enc.combatants.entry(attacker.clone()).or_default();
                         a.misses += 1;
+                        *a.misses_by_kind.entry(kind.label().into()).or_default() += 1;
+                        let t = enc.combatants.entry(target.clone()).or_default();
+                        *t.avoids_by_kind.entry(kind.label().into()).or_default() += 1;
                     }
                 }
             }
@@ -552,8 +669,10 @@ impl CombatEngine {
                         ab.hits += 1;
                         *ab.series.entry(epoch).or_default() += amount;
                         *h.heal_series.entry(epoch).or_default() += amount;
+                        *h.heals_by_target.entry(target.clone()).or_default() += amount;
                         let t = enc.combatants.entry(target.clone()).or_default();
                         t.heal_received += amount;
+                        *t.heals_received_from.entry(healer.clone()).or_default() += amount;
                     }
                 }
             }
@@ -574,15 +693,17 @@ impl CombatEngine {
                             .entry(owner.clone())
                             .or_default()
                             .insert(target.clone());
-                        let o = enc.combatants.entry(owner).or_default();
+                        let o = enc.combatants.entry(owner.clone()).or_default();
                         o.healing += amount;
                         let ab = o.abilities.entry(format!("{ability} (ward)")).or_default();
                         ab.healing += amount;
                         ab.hits += 1;
                         *ab.series.entry(epoch).or_default() += amount;
                         *o.heal_series.entry(epoch).or_default() += amount;
+                        *o.heals_by_target.entry(target.clone()).or_default() += amount;
                         let t = enc.combatants.entry(target.clone()).or_default();
                         t.heal_received += amount;
+                        *t.heals_received_from.entry(owner).or_default() += amount;
                     }
                 }
             }
@@ -682,7 +803,19 @@ impl CombatEngine {
                     }
                 }
             }
+            LogEvent::ZoneEnter { zone } => {
+                // Zoner termine le combat en cours.
+                self.close_current();
+                self.current_zone = zone.clone();
+            }
             LogEvent::StartFight | LogEvent::StopFight => {}
+        }
+
+        // Log brut : conserve les lignes du combat en cours (cap 5000).
+        if let Some(enc) = self.current.as_mut() {
+            if epoch <= enc.end + self.timeout && enc.raw_lines.len() < 5000 {
+                enc.raw_lines.push((epoch, line.message.clone()));
+            }
         }
     }
 
@@ -690,6 +823,43 @@ impl CombatEngine {
     pub fn display_encounter(&self) -> Option<&Encounter> {
         self.current.as_ref().or_else(|| self.history.last())
     }
+}
+
+/// Agrège plusieurs encounters en un pseudo-encounter « session » :
+/// les combats sont concaténés bout à bout (durée = somme des durées,
+/// séries temporelles remappées pour les graphes).
+pub fn aggregate_session(encs: &[Encounter]) -> Encounter {
+    let mut agg = Encounter::new(0);
+    agg.finished = true;
+    agg.zone = "Session".into();
+    let mut offset: u64 = 0;
+    for e in encs {
+        let base = e.start;
+        let remap = move |t: u64| offset + t.saturating_sub(base);
+        for (name, c) in &e.combatants {
+            agg.combatants
+                .entry(name.clone())
+                .or_default()
+                .fold_remap(c, &remap);
+        }
+        for (a, ts) in &e.attacks {
+            agg.attacks.entry(a.clone()).or_default().extend(ts.iter().cloned());
+        }
+        for (a, ts) in &e.assists {
+            agg.assists.entry(a.clone()).or_default().extend(ts.iter().cloned());
+        }
+        agg.kills.extend(e.kills.iter().cloned());
+        for d in &e.deaths_log {
+            let mut d = d.clone();
+            d.epoch = remap(d.epoch);
+            agg.deaths_log.push(d);
+        }
+        // +1 : évite la collision entre la dernière seconde d'un combat
+        // et la première du suivant dans les séries.
+        offset += e.duration() + 1;
+    }
+    agg.end = offset.saturating_sub(1).max(1);
+    agg
 }
 
 pub fn fmt_num(n: u64) -> String {
@@ -913,6 +1083,70 @@ mod tests {
         assert_eq!(d.hits[0].amount, 5000);
         assert_eq!(d.hits[0].ability.as_deref(), Some("Flame Breath"));
         assert_eq!(enc.combatants["Tank"].deaths, 1);
+    }
+
+    #[test]
+    fn zone_tracking_and_per_target_maps() {
+        let parser = Parser::new("Pawkod");
+        let mut engine = CombatEngine::new(6);
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                "(900)[Tue May 26 17:42:00 2026] You have entered Darklight Wood.",
+                "(1000)[Tue May 26 17:42:26 2026] YOU hit a rat for 100 crushing damage.",
+                "(1001)[Tue May 26 17:42:27 2026] YOU hit a bat for 40 crushing damage.",
+                "(1002)[Tue May 26 17:42:28 2026] a rat hits YOU for 25 crushing damage.",
+                "(1002)[Tue May 26 17:42:28 2026] a rat tries to crush YOU, but YOU parry.",
+                "(1003)[Tue May 26 17:42:29 2026] Healer's Salve heals YOU for 50 hit points.",
+            ],
+        );
+        let enc = engine.current.as_ref().unwrap();
+        assert_eq!(enc.zone, "Darklight Wood");
+        let me = &enc.combatants["Pawkod"];
+        assert_eq!(me.damage_by_target["a rat"], 100);
+        assert_eq!(me.damage_by_target["a bat"], 40);
+        assert_eq!(me.taken_by_attacker["a rat"], 25);
+        assert_eq!(me.heals_received_from["Healer"], 50);
+        assert_eq!(me.avoids_by_kind["parade"], 1);
+        assert_eq!(enc.combatants["a rat"].misses_by_kind["parade"], 1);
+        assert_eq!(enc.combatants["Healer"].heals_by_target["Pawkod"], 50);
+        // Log brut capturé
+        assert!(enc.raw_lines.len() >= 5);
+    }
+
+    #[test]
+    fn session_aggregate_concatenates() {
+        let parser = Parser::new("Pawkod");
+        let mut engine = CombatEngine::new(6);
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                // Combat 1 : 0..4 s, 300 dmg
+                "(1000)[Tue May 26 17:42:26 2026] YOU hit a rat for 100 crushing damage.",
+                "(1004)[Tue May 26 17:42:30 2026] YOU hit a rat for 200 crushing damage.",
+                // Combat 2 (après timeout) : 100 dmg
+                "(1100)[Tue May 26 17:44:06 2026] YOU hit a bat for 100 crushing damage.",
+                "(1102)[Tue May 26 17:44:08 2026] YOU hit a bat for 50 crushing damage.",
+            ],
+        );
+        engine.tick(2000);
+        assert_eq!(engine.history.len(), 2);
+
+        let agg = aggregate_session(&engine.history);
+        let me = &agg.combatants["Pawkod"];
+        assert_eq!(me.damage, 450);
+        // Durée = somme des durées + 1 s de gap entre combats
+        let d1 = engine.history[0].duration();
+        let d2 = engine.history[1].duration();
+        assert_eq!(agg.duration(), d1 + 1 + d2);
+        // Séries remappées : combat 1 à t=0..4, combat 2 décalé après d1+1
+        assert_eq!(me.dmg_series.get(&0), Some(&100));
+        assert_eq!(me.dmg_series.get(&4), Some(&200));
+        assert_eq!(me.dmg_series.get(&(d1 + 1)), Some(&100));
+        assert_eq!(me.damage_by_target["a rat"], 300);
+        assert_eq!(me.damage_by_target["a bat"], 150);
     }
 
     #[test]

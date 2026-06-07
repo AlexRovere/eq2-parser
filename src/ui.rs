@@ -123,6 +123,13 @@ pub struct App {
     filter_combatant: String,
     filter_ability: String,
     filter_encounters: String,
+    filter_log: String,
+    /// Pseudo-encounter « Session entière » sélectionné.
+    session_selected: bool,
+    /// Cache de l'agrégat de session : (longueur d'historique, agrégat).
+    session_cache: Option<(usize, Encounter)>,
+    /// Nom saisi pour enregistrer un profil d'overlay.
+    profile_name: String,
 }
 
 impl App {
@@ -155,6 +162,10 @@ impl App {
             filter_combatant: String::new(),
             filter_ability: String::new(),
             filter_encounters: String::new(),
+            filter_log: String::new(),
+            session_selected: false,
+            session_cache: None,
+            profile_name: String::new(),
         };
         // Réattache automatiquement le dernier log suivi.
         if let Some(last) = app.config.last_log.clone() {
@@ -253,6 +264,20 @@ impl App {
         owners
     }
 
+    /// Agrégat « session entière », mis en cache tant que l'historique ne change pas.
+    fn session_aggregate(&mut self) -> Encounter {
+        let len = self.engine.history.len();
+        if self
+            .session_cache
+            .as_ref()
+            .is_none_or(|(cached_len, _)| *cached_len != len)
+        {
+            self.session_cache =
+                Some((len, crate::combat::aggregate_session(&self.engine.history)));
+        }
+        self.session_cache.as_ref().unwrap().1.clone()
+    }
+
     /// Encounter prêt pour l'affichage : pets fusionnés + filtre alliés/ennemis.
     fn for_display(&self, enc: &Encounter) -> Encounter {
         let owners = self.effective_owners();
@@ -333,6 +358,48 @@ impl App {
                         &mut self.graph_state,
                     );
                 });
+
+            // Log brut (combats de la session courante uniquement — non persisté).
+            if !enc.raw_lines.is_empty() {
+                ui.separator();
+                egui::CollapsingHeader::new(format!(
+                    "📜 Log brut ({} lignes)",
+                    enc.raw_lines.len()
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    filter_box(ui, &mut self.filter_log, "filtrer les lignes…");
+                    let filter = self.filter_log.to_lowercase();
+                    let lines: Vec<&(u64, String)> = enc
+                        .raw_lines
+                        .iter()
+                        .filter(|(_, m)| {
+                            filter.is_empty() || m.to_lowercase().contains(&filter)
+                        })
+                        .collect();
+                    egui::ScrollArea::vertical()
+                        .id_salt("raw_log")
+                        .max_height(300.0)
+                        .show_rows(ui, 16.0, lines.len(), |ui, range| {
+                            for (epoch, msg) in &lines[range] {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "[{}]",
+                                            fmt_duration(epoch.saturating_sub(enc.start))
+                                        ))
+                                        .weak()
+                                        .monospace()
+                                        .size(11.0),
+                                    );
+                                    ui.label(
+                                        RichText::new(msg.as_str()).monospace().size(11.0),
+                                    );
+                                });
+                            }
+                        });
+                });
+            }
         });
     }
 
@@ -501,18 +568,51 @@ impl App {
                 ui.separator();
                 let filter = self.filter_encounters.clone();
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Pseudo-encounter : toute la session cumulée.
+                    if !self.engine.history.is_empty() {
+                        let label = format!(
+                            "Σ Session entière ({} combats)",
+                            self.engine.history.len()
+                        );
+                        if ui
+                            .selectable_label(self.session_selected, RichText::new(label).strong())
+                            .clicked()
+                        {
+                            self.session_selected = true;
+                            self.selected_encounter = None;
+                            self.selected_combatant = None;
+                        }
+                        ui.separator();
+                    }
                     if self.engine.current.is_some() {
-                        let sel = self.selected_encounter.is_none();
+                        let sel = self.selected_encounter.is_none() && !self.session_selected;
                         if ui.selectable_label(sel, "▶ Combat en cours").clicked() {
                             self.selected_encounter = None;
+                            self.session_selected = false;
                             self.selected_combatant = None;
                         }
                     }
                     let mut shown = 0;
                     let mut selected: Option<usize> = None;
+                    let mut last_zone: Option<&str> = None;
                     for (i, enc) in self.engine.history.iter().enumerate().rev() {
                         if !matches_filter(&enc.title(), &filter) {
                             continue;
+                        }
+                        // En-tête de zone quand elle change dans la liste.
+                        if last_zone != Some(enc.zone.as_str()) {
+                            last_zone = Some(enc.zone.as_str());
+                            let zone = if enc.zone.is_empty() {
+                                "(zone inconnue)"
+                            } else {
+                                enc.zone.as_str()
+                            };
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("🗺 {zone}"))
+                                    .small()
+                                    .color(Color32::from_rgb(93, 173, 226)),
+                            );
                         }
                         shown += 1;
                         let label = format!(
@@ -521,13 +621,15 @@ impl App {
                             fmt_num(enc.total_damage()),
                             fmt_duration(enc.duration())
                         );
-                        let sel = self.selected_encounter == Some(i);
+                        let sel =
+                            self.selected_encounter == Some(i) && !self.session_selected;
                         if ui.selectable_label(sel, label).clicked() {
                             selected = Some(i);
                         }
                     }
                     if let Some(i) = selected {
                         self.selected_encounter = Some(i);
+                        self.session_selected = false;
                         self.selected_combatant = None;
                     }
                     if shown == 0 && self.engine.current.is_none() {
@@ -536,9 +638,13 @@ impl App {
                 });
             });
 
-        let raw = match self.selected_encounter {
-            Some(i) => self.engine.history.get(i).cloned(),
-            None => self.engine.display_encounter().cloned(),
+        let raw = if self.session_selected {
+            Some(self.session_aggregate())
+        } else {
+            match self.selected_encounter {
+                Some(i) => self.engine.history.get(i).cloned(),
+                None => self.engine.display_encounter().cloned(),
+            }
         };
         let Some(raw) = raw else {
             ui.centered_and_justified(|ui| {
@@ -548,7 +654,20 @@ impl App {
         };
         let enc = self.for_display(&raw);
         ui.horizontal(|ui| {
-            ui.heading(enc.title());
+            if self.session_selected {
+                ui.heading(format!(
+                    "Σ Session entière ({} combats)",
+                    self.engine.history.len()
+                ));
+            } else {
+                ui.heading(enc.title());
+                if !enc.zone.is_empty() {
+                    ui.label(
+                        RichText::new(format!("🗺 {}", enc.zone))
+                            .color(Color32::from_rgb(93, 173, 226)),
+                    );
+                }
+            }
             ui.label(format!(
                 "{} — total {}",
                 fmt_duration(enc.duration()),
@@ -998,6 +1117,59 @@ impl App {
             changed = true;
             self.passthrough_sent = false; // force le renvoi de la commande
         }
+
+        ui.add_space(4.0);
+        ui.label(RichText::new("Profils d'overlay").strong());
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.profile_name)
+                    .hint_text("nom du profil (ex : raid, solo)…")
+                    .desired_width(160.0),
+            );
+            if ui.button("💾 Enregistrer les réglages actuels").clicked()
+                && !self.profile_name.trim().is_empty()
+            {
+                let name = self.profile_name.trim().to_string();
+                let profile = self.config.capture_profile(&name);
+                // Remplace un profil de même nom, sinon ajoute.
+                if let Some(existing) = self
+                    .config
+                    .overlay_profiles
+                    .iter_mut()
+                    .find(|p| p.name == name)
+                {
+                    *existing = profile;
+                } else {
+                    self.config.overlay_profiles.push(profile);
+                }
+                self.profile_name.clear();
+                changed = true;
+            }
+        });
+        let mut to_apply: Option<usize> = None;
+        let mut to_delete: Option<usize> = None;
+        for (i, p) in self.config.overlay_profiles.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("• {}", p.name));
+                if ui.small_button("Appliquer").clicked() {
+                    to_apply = Some(i);
+                }
+                if ui.small_button("🗑").clicked() {
+                    to_delete = Some(i);
+                }
+            });
+        }
+        if let Some(i) = to_apply {
+            let p = self.config.overlay_profiles[i].clone();
+            self.config.apply_profile(&p);
+            self.passthrough_sent = false;
+            changed = true;
+        }
+        if let Some(i) = to_delete {
+            self.config.overlay_profiles.remove(i);
+            changed = true;
+        }
+
         if changed {
             self.config.save();
         }
@@ -1924,7 +2096,85 @@ impl App {
             }
         });
     self.sort_states.insert("ability", st);
+
+    // Défense : attaques adverses évitées, par type.
+    if !c.avoids_by_kind.is_empty() {
+        let total: u32 = c.avoids_by_kind.values().sum();
+        let detail = c
+            .avoids_by_kind
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        ui.label(
+            RichText::new(format!("🛡 Évitements : {detail}  (total {total})"))
+                .color(Color32::from_rgb(46, 204, 113)),
+        );
     }
+    if !c.misses_by_kind.is_empty() {
+        let total: u32 = c.misses_by_kind.values().sum();
+        let detail = c
+            .misses_by_kind
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let acc = if c.hits + total > 0 {
+            c.hits as f64 / (c.hits + total) as f64 * 100.0
+        } else {
+            100.0
+        };
+        ui.label(
+            RichText::new(format!(
+                "⚔ Attaques évitées par l'adversaire : {detail}  (précision {acc:.1} %)"
+            ))
+            .weak(),
+        );
+    }
+
+    // Détail par cible.
+    ui.add_space(4.0);
+    ui.horizontal_top(|ui| {
+        target_table(ui, "🎯 Dégâts par cible", &c.damage_by_target);
+        target_table(ui, "🛡 Reçus par attaquant", &c.taken_by_attacker);
+    });
+    ui.horizontal_top(|ui| {
+        target_table(ui, "💚 Soins par bénéficiaire", &c.heals_by_target);
+        target_table(ui, "💙 Soins reçus de", &c.heals_received_from);
+    });
+    }
+}
+
+/// Mini-table « nom → montant (%) », triée décroissante, top 12.
+fn target_table(ui: &mut egui::Ui, title: &str, map: &std::collections::BTreeMap<String, u64>) {
+    if map.is_empty() {
+        return;
+    }
+    let total: u64 = map.values().sum::<u64>().max(1);
+    let mut rows: Vec<(&String, &u64)> = map.iter().collect();
+    rows.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
+    ui.group(|ui| {
+        ui.set_min_width(300.0);
+        ui.label(RichText::new(title).strong());
+        for (name, v) in rows.iter().take(12) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name.as_str()).small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  ({:.1} %)",
+                            fmt_num(**v),
+                            **v as f64 / total as f64 * 100.0
+                        ))
+                        .small(),
+                    );
+                });
+            });
+        }
+        if rows.len() > 12 {
+            ui.label(RichText::new(format!("… +{} autres", rows.len() - 12)).weak().small());
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,6 +2558,21 @@ fn overlay_quick_menu(
     resp.context_menu(|ui| {
         ui.set_min_width(260.0);
         ui.label(RichText::new("Réglages overlay").strong());
+        // Profils commutables.
+        if !cfg.overlay_profiles.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Profil :");
+                let profiles = cfg.overlay_profiles.clone();
+                for p in &profiles {
+                    if ui.small_button(p.name.as_str()).clicked() {
+                        cfg.apply_profile(p);
+                        *changed = true;
+                        *passthrough_toggled = true;
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
         ui.separator();
 
         *changed |= ui

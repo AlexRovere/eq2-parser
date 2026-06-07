@@ -60,6 +60,7 @@ fn main() {
                     LogEvent::StartFight | LogEvent::StopFight => "fight_state",
                     LogEvent::PetSendAttack => "pet_send",
                     LogEvent::PlayerSeen { .. } => "player_seen",
+                    LogEvent::ZoneEnter { .. } => "zone",
                 };
                 *by_kind.entry(kind).or_default() += 1;
                 engine.process(&pl);

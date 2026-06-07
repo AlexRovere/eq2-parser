@@ -19,6 +19,20 @@ pub enum MissKind {
     Resist,
 }
 
+impl MissKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MissKind::Miss => "raté",
+            MissKind::Parry => "parade",
+            MissKind::Riposte => "riposte",
+            MissKind::Dodge => "esquive",
+            MissKind::Block => "bloc",
+            MissKind::Deflect => "déflection",
+            MissKind::Resist => "résisté",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogEvent {
     Damage {
@@ -80,6 +94,8 @@ pub enum LogEvent {
     PetSendAttack,
     /// Nom vu dans un lien de chat `\aPC` : c'est un joueur, jamais un pet.
     PlayerSeen { name: String },
+    /// `You have entered <Zone>.` — changement de zone.
+    ZoneEnter { zone: String },
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +190,7 @@ fn patterns() -> &'static Patterns {
             .unwrap(),
             // <attacker> tries to <verb> <target>, but [misses | <target> parries...].
             miss: Regex::new(
-                r"^(.+?) tries to \w+ (.+?), but (?:(misses)|.+? (parries|ripostes|dodges|blocks|deflects)|(.+? resists))[.!]?$",
+                r"^(.+?) tries to \w+ (.+?), but (?:(misses)|.+? (parries|parry|ripostes|riposte|dodges|dodge|blocks|block|deflects|deflect)|(.+? resists))[.!]?$",
             )
             .unwrap(),
             heal_your: Regex::new(&format!(
@@ -270,6 +286,12 @@ impl Parser {
             "You stop fighting." => return Some(LogEvent::StopFight),
             "You send your pet in for the attack!" => return Some(LogEvent::PetSendAttack),
             _ => {}
+        }
+        if let Some(zone) = msg
+            .strip_prefix("You have entered ")
+            .and_then(|z| z.strip_suffix('.'))
+        {
+            return Some(LogEvent::ZoneEnter { zone: zone.to_string() });
         }
         // Les lignes de chat commencent par \aPC, \aNPC… : on en extrait juste
         // le nom des joueurs (utile pour l'attribution des pets), puis on ignore.
@@ -398,12 +420,13 @@ impl Parser {
                 let kind = if c.get(3).is_some() {
                     MissKind::Miss
                 } else if let Some(k) = c.get(4) {
+                    // Couvre la 3e personne ("parries") et la forme YOU ("parry").
                     match k.as_str() {
-                        "parries" => MissKind::Parry,
-                        "ripostes" => MissKind::Riposte,
-                        "dodges" => MissKind::Dodge,
-                        "blocks" => MissKind::Block,
-                        "deflects" => MissKind::Deflect,
+                        s if s.starts_with("parr") => MissKind::Parry,
+                        s if s.starts_with("ripost") => MissKind::Riposte,
+                        s if s.starts_with("dodge") => MissKind::Dodge,
+                        s if s.starts_with("block") => MissKind::Block,
+                        s if s.starts_with("deflect") => MissKind::Deflect,
                         _ => MissKind::Miss,
                     }
                 } else {
@@ -950,7 +973,10 @@ mod tests {
             p().parse_message(r#"\aNPC 15261 a Sabertooth pup:a Sabertooth pup\/a says in Gnollish, "Spin!""#),
             None
         );
-        assert_eq!(p().parse_message("You have entered Darklight Wood."), None);
+        assert_eq!(
+            p().parse_message("You have entered Darklight Wood."),
+            Some(LogEvent::ZoneEnter { zone: "Darklight Wood".into() })
+        );
         assert_eq!(
             p().parse_message("Your faction standing with The Great Herd got better."),
             None

@@ -38,29 +38,33 @@ Mis à jour : 2026-06-07.
 - [ ] Import/export de packs de triggers (partage communautaire, format XML ACT ?)
 
 ### Agrégat de session / zones
-- [ ] Pseudo-encounter « Session entière » qui cumule tous les combats
-- [ ] Parser `You have entered <Zone>.` → grouper l'historique par zone
+- [x] Pseudo-encounter « Σ Session entière » (combats concaténés bout à bout,
+      séries temporelles remappées, cache invalidé à chaque nouveau combat)
+- [x] Parser `You have entered <Zone>.` → en-têtes de zone dans l'historique,
+      zone affichée dans le détail, zoner clôt le combat en cours
 - [ ] Stats par zone (durée totale, DPS moyen, morts)
 
 ## 🟡 À faire — priorité moyenne
 
 ### Détail par cible
-- [ ] Mes dégâts ventilés par mob (utile sur les fights multi-adds)
-- [ ] Vue tank : dégâts reçus ventilés par attaquant + par type de dégâts
-- [ ] Matrice de soins : qui a soigné qui
+- [x] Mes dégâts ventilés par mob (mini-table « Dégâts par cible »)
+- [x] Vue tank : dégâts reçus ventilés par attaquant
+- [x] Matrice de soins : soins donnés par bénéficiaire + soins reçus par soigneur
+- [ ] Ventilation par type de dégâts (crushing/heat/…)
 
 ### Breakdown avoidance / défense
-- [ ] Détail parry / riposte / dodge / block / deflect par combattant
-      (les données sont déjà comptées, il manque l'affichage)
-- [ ] Taux d'évitement global (vue tank)
+- [x] Détail parade / riposte / esquive / bloc par combattant (évitements +
+      attaques ratées avec % de précision) — gère aussi les formes `YOU parry`
 - [ ] Resists par école de magie
 
 ### Confort UI
 - [x] Tables triables par clic sur l'en-tête de colonne (dégâts, soins, power,
       breakdown par sort, comparaison)
-- [x] Filtres texte : combattants, sorts, historique des encounters
-- [ ] Vue « log brut » d'un encounter (les lignes sources, filtrables)
-- [ ] Profils d'overlay commutables (raid compact / solo détaillé)
+- [x] Filtres texte : combattants, sorts, historique des encounters, log brut
+- [x] Vue « log brut » d'un encounter (lignes sources filtrables, cap 5000,
+      session courante uniquement — non persisté)
+- [x] Profils d'overlay commutables (enregistrer/appliquer/supprimer dans
+      Settings, boutons d'application rapide dans le menu clic droit)
 
 ## 🟢 Plus tard / niche
 
