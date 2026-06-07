@@ -772,6 +772,62 @@ impl App {
             if ui.button("➕ Ajouter").clicked() {
                 self.config.triggers.push(Trigger::default());
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("📥 Importer")
+                    .on_hover_text("Ajoute les triggers d'un fichier JSON (pack partagé)")
+                    .clicked()
+                {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Pack de triggers JSON", &["json"])
+                        .pick_file()
+                    {
+                        if let Ok(s) = std::fs::read_to_string(&p) {
+                            match serde_json::from_str::<Vec<Trigger>>(
+                                s.trim_start_matches('\u{feff}'),
+                            ) {
+                                Ok(imported) => {
+                                    let n = imported.len();
+                                    self.config.triggers.extend(imported);
+                                    self.trigger_engine.recompile(&self.config.triggers);
+                                    self.config.save();
+                                    self.trigger_engine.toasts.push(
+                                        crate::triggers::Toast {
+                                            text: format!("{n} triggers importés"),
+                                            created: Instant::now(),
+                                        },
+                                    );
+                                }
+                                Err(e) => {
+                                    self.trigger_engine.toasts.push(
+                                        crate::triggers::Toast {
+                                            text: format!("Import échoué : {e}"),
+                                            created: Instant::now(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if !self.config.triggers.is_empty()
+                    && ui
+                        .button("📤 Exporter")
+                        .on_hover_text("Sauvegarde tous les triggers en JSON (partageable)")
+                        .clicked()
+                {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_file_name("triggers-eq2.json")
+                        .add_filter("Pack de triggers JSON", &["json"])
+                        .save_file()
+                    {
+                        if let Ok(json) = serde_json::to_string_pretty(&self.config.triggers)
+                        {
+                            let _ = std::fs::write(p, json);
+                        }
+                    }
+                }
+            });
         });
         ui.label(
             RichText::new(
@@ -2205,11 +2261,15 @@ impl App {
         );
     }
 
-    // Détail par cible.
+    // Détail par cible et par type.
     ui.add_space(4.0);
     ui.horizontal_top(|ui| {
         target_table(ui, "🎯 Dégâts par cible", &c.damage_by_target);
         target_table(ui, "🛡 Reçus par attaquant", &c.taken_by_attacker);
+    });
+    ui.horizontal_top(|ui| {
+        target_table(ui, "💥 Dégâts par type", &c.damage_by_type);
+        target_table(ui, "🩸 Reçus par type", &c.taken_by_type);
     });
     ui.horizontal_top(|ui| {
         target_table(ui, "💚 Soins par bénéficiaire", &c.heals_by_target);
@@ -2454,7 +2514,8 @@ impl App {
                         frame.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
 
-                            // Barre de titre : drag + clic droit = réglages rapides.
+                            // Barre de titre : drag + clic droit = réglages rapides,
+                            // croix à droite pour masquer l'overlay.
                             let resp = ui
                                 .horizontal(|ui| {
                                     ui.label(
@@ -2462,13 +2523,39 @@ impl App {
                                             .size(11.0 * s)
                                             .color(Color32::WHITE),
                                     );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("✖")
+                                                            .size(11.0 * s)
+                                                            .color(Color32::from_rgb(
+                                                                231, 76, 60,
+                                                            )),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(
+                                                    "Masquer l'overlay (réactivable \
+                                                     via la case Overlay de la fenêtre \
+                                                     principale)",
+                                                )
+                                                .clicked()
+                                            {
+                                                cfg.overlay_enabled = false;
+                                                changed = true;
+                                            }
+                                        },
+                                    );
                                 })
                                 .response;
+                            // Zone de drag : la barre de titre moins la croix.
+                            let mut drag_rect = resp.rect.expand2(egui::vec2(0.0, 4.0));
+                            drag_rect.max.x -= 26.0 * s;
                             let interact = ui.interact(
-                                resp.rect.expand2(egui::vec2(
-                                    ui.available_width().max(0.0),
-                                    4.0,
-                                )),
+                                drag_rect,
                                 ui.id().with("drag"),
                                 egui::Sense::click_and_drag(),
                             );

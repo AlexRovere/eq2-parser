@@ -35,7 +35,8 @@ Mis à jour : 2026-06-07.
 - [x] **Timers déclenchés** : compte à rebours nommé dans l'overlay (barre orange),
       toast + bip à expiration
 - [x] Cooldown de trigger (ne pas re-déclencher pendant N s)
-- [ ] Import/export de packs de triggers (partage communautaire, format XML ACT ?)
+- [x] Import/export de packs de triggers en JSON (boutons 📥/📤 dans l'onglet
+      Triggers) — l'import du format XML ACT reste à faire si besoin
 
 ### Agrégat de session / zones
 - [x] Pseudo-encounter « Σ Session entière » (combats concaténés bout à bout,
@@ -51,7 +52,9 @@ Mis à jour : 2026-06-07.
 - [x] Mes dégâts ventilés par mob (mini-table « Dégâts par cible »)
 - [x] Vue tank : dégâts reçus ventilés par attaquant
 - [x] Matrice de soins : soins donnés par bénéficiaire + soins reçus par soigneur
-- [ ] Ventilation par type de dégâts (crushing/heat/…)
+- [x] Ventilation par type de dégâts : infligés et reçus (crushing/heat/… +
+      « (environnement) » pour les chutes) — attribution au type principal de
+      la ligne (les riders multi-types comptent dans le type dominant)
 
 ### Breakdown avoidance / défense
 - [x] Détail parade / riposte / esquive / bloc par combattant (évitements +

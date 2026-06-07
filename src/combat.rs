@@ -69,6 +69,10 @@ pub struct Combatant {
     pub avoids_by_kind: BTreeMap<String, u32>,
     /// Mes sorts résistés, par école de magie (heat, cold, disease…).
     pub resists_by_school: BTreeMap<String, u32>,
+    /// Mes dégâts infligés, par type (crushing, heat… — type principal de la ligne).
+    pub damage_by_type: BTreeMap<String, u64>,
+    /// Dégâts reçus, par type.
+    pub taken_by_type: BTreeMap<String, u64>,
 }
 
 impl Combatant {
@@ -133,6 +137,12 @@ impl Combatant {
         for (k, v) in &other.resists_by_school {
             *self.resists_by_school.entry(k.clone()).or_default() += v;
         }
+        for (k, v) in &other.damage_by_type {
+            *self.damage_by_type.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.taken_by_type {
+            *self.taken_by_type.entry(k.clone()).or_default() += v;
+        }
     }
 
     /// Fusionne `other` tel quel (agrégat de session), avec remapping temporel
@@ -194,6 +204,12 @@ impl Combatant {
         }
         for (k, v) in &other.resists_by_school {
             *self.resists_by_school.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.damage_by_type {
+            *self.damage_by_type.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.taken_by_type {
+            *self.taken_by_type.entry(k.clone()).or_default() += v;
         }
     }
 }
@@ -563,7 +579,7 @@ impl CombatEngine {
         };
 
         match event {
-            LogEvent::Damage { attacker, ability, target, amount, crit, .. } => {
+            LogEvent::Damage { attacker, ability, target, amount, crit, damage_type } => {
                 // Auto-détection de pet dans les 4 s après "You send your pet in
                 // for the attack!" : nouvel attaquant dont le nom ressemble à un
                 // pet généré par EQ2 (un seul mot, capitalisé — ex. "Hadoken"),
@@ -615,6 +631,7 @@ impl CombatEngine {
                     }
                     a.max_hit = a.max_hit.max(*amount);
                     *a.damage_by_target.entry(target.clone()).or_default() += amount;
+                    *a.damage_by_type.entry(damage_type.clone()).or_default() += amount;
                     let key = ability.clone().unwrap_or_else(|| "(auto-attack)".into());
                     let ab = a.abilities.entry(key).or_default();
                     ab.damage += amount;
@@ -630,6 +647,7 @@ impl CombatEngine {
                 t.damage_taken += amount;
                 *t.taken_series.entry(epoch).or_default() += amount;
                 *t.taken_by_attacker.entry(attacker.clone()).or_default() += amount;
+                *t.taken_by_type.entry(damage_type.clone()).or_default() += amount;
             }
             LogEvent::FailedHit { attacker, target } => {
                 let enc = self.ensure_encounter(epoch);
@@ -829,6 +847,7 @@ impl CombatEngine {
                         let t = enc.combatants.entry(target.clone()).or_default();
                         t.damage_taken += amount;
                         *t.taken_series.entry(epoch).or_default() += amount;
+                        *t.taken_by_type.entry("(environnement)".into()).or_default() += amount;
                     }
                 }
             }
