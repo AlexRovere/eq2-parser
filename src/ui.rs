@@ -731,16 +731,58 @@ impl App {
                 .checkbox(&mut self.config.overlay_show_power, "Power")
                 .changed();
         });
-        ui.horizontal(|ui| {
-            ui.label("Texte custom :");
+        ui.add_space(4.0);
+        ui.label(RichText::new("Texte custom (variables)").strong());
+        ui.label(
+            RichText::new(
+                "Syntaxe : {{dps}} = toi · {{dps:Nom}} = un joueur · {{dps:1}} = rang 1. \
+                 Multi-lignes accepté.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.horizontal_top(|ui| {
             changed |= ui
                 .add(
-                    egui::TextEdit::singleline(&mut self.config.overlay_custom_text)
-                        .hint_text("affiché en bas de l'overlay…")
-                        .desired_width(280.0),
+                    egui::TextEdit::multiline(&mut self.config.overlay_custom_text)
+                        .hint_text("ex : hps {{hps}} — je tape {{dps}} ({{crit}} crit)\ntop : {{name:1}} à {{dps:1}}")
+                        .desired_rows(2)
+                        .desired_width(420.0)
+                        .font(egui::TextStyle::Monospace),
                 )
                 .changed();
+            ui.menu_button("➕ Variable", |ui| {
+                ui.set_min_width(320.0);
+                for (var, desc) in crate::template::VARIABLES {
+                    if ui.button(format!("{var}  —  {desc}")).clicked() {
+                        self.config.overlay_custom_text.push_str(var);
+                        changed = true;
+                        ui.close_menu();
+                    }
+                }
+            });
         });
+        // Aperçu live sur l'encounter affiché.
+        if !self.config.overlay_custom_text.trim().is_empty() {
+            let enc = self
+                .engine
+                .display_encounter()
+                .cloned()
+                .map(|e| self.for_display(&e));
+            let preview = crate::template::render(
+                &self.config.overlay_custom_text,
+                enc.as_ref(),
+                self.self_name(),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Aperçu :").weak());
+                ui.label(
+                    RichText::new(preview)
+                        .italics()
+                        .color(Color32::from_rgb(241, 196, 15)),
+                );
+            });
+        }
         if ui
             .checkbox(
                 &mut self.config.overlay_click_through,
@@ -1562,9 +1604,25 @@ impl App {
             None => "EQ2 Tools — en attente".to_string(),
         };
 
+        // Texte custom : rendu du template ({{dps}}, {{hps:1}}, …) sur l'encounter affiché.
+        let custom_rendered = if cfg.overlay_custom_text.trim().is_empty() {
+            String::new()
+        } else {
+            crate::template::render(
+                &cfg.overlay_custom_text,
+                enc.as_ref(),
+                self_name.as_deref(),
+            )
+        };
+        let custom_lines: Vec<String> = custom_rendered
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+
         // Espace réservé en bas (texte custom + toasts) pour l'auto-fit des barres.
         let row_h = 20.0 * s;
-        let custom_h = if cfg.overlay_custom_text.is_empty() { 0.0 } else { 18.0 * s };
+        let custom_h = custom_lines.len() as f32 * 18.0 * s;
         let reserved_bottom = custom_h + toasts.len() as f32 * 18.0 * s;
 
         let mut changed = false;
@@ -1687,10 +1745,10 @@ impl App {
                                 }
                             }
 
-                            // Texte custom.
-                            if !cfg.overlay_custom_text.is_empty() {
+                            // Texte custom (template rendu, multi-lignes).
+                            for line in &custom_lines {
                                 ui.label(
-                                    RichText::new(cfg.overlay_custom_text.as_str())
+                                    RichText::new(line.as_str())
                                         .size(11.0 * s)
                                         .italics()
                                         .color(accent),
@@ -1808,11 +1866,22 @@ fn overlay_quick_menu(
             ui.label("Texte :");
             *changed |= ui
                 .add(
-                    egui::TextEdit::singleline(&mut cfg.overlay_custom_text)
-                        .hint_text("texte libre affiché en bas…")
-                        .desired_width(170.0),
+                    egui::TextEdit::multiline(&mut cfg.overlay_custom_text)
+                        .hint_text("ex : hps {{hps}} — top {{name:1}} {{dps:1}}")
+                        .desired_rows(2)
+                        .desired_width(190.0),
                 )
                 .changed();
+            ui.menu_button("➕", |ui| {
+                ui.set_min_width(280.0);
+                for (var, desc) in crate::template::VARIABLES {
+                    if ui.button(format!("{var}  —  {desc}")).clicked() {
+                        cfg.overlay_custom_text.push_str(var);
+                        *changed = true;
+                        ui.close_menu();
+                    }
+                }
+            });
         });
         ui.separator();
 

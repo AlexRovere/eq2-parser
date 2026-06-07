@@ -10,7 +10,15 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
   **Clic droit sur l'overlay** pour tout régler en jeu : transparence, taille (échelle),
   largeur, nombre de barres, couleurs (fond + accent), titre détaillé
   (durée • total • DPS raid • kills), texte libre, click-through.
+  Redimensionnable par le grip ↘ comme une fenêtre (les barres s'adaptent à la hauteur).
   Ton personnage est surligné avec la couleur d'accent.
+- **Texte custom avec variables** : template multi-lignes rendu en temps réel,
+  ex. `je tape {{dps}} ({{crit}} crit) — top {{name:1}} à {{dps:1}}`.
+  Variables : `{{dps}} {{hps}} {{pps}} {{dmg}} {{heal}} {{power}} {{crit}} {{maxhit}}
+  {{rank}} {{taken}} {{deaths}} {{name}} {{target}} {{time}} {{raiddps}} {{raidhps}}
+  {{total}} {{kills}}` — sans argument = toi, `{{dps:Nom}}` = un joueur,
+  `{{dps:1}}` = le rang 1 du classement. Menu d'insertion ➕ et aperçu live
+  dans Settings.
 - **Détection automatique des encounters** : démarre à la première action offensive,
   se clôt après N secondes d'inactivité (réglable, défaut 6 s).
 - **Historique de session** : liste des combats avec totaux, durée, kills.

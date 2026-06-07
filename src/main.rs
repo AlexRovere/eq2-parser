@@ -5,6 +5,7 @@ mod config;
 mod export;
 mod parser;
 mod tailer;
+mod template;
 mod triggers;
 mod ui;
 
