@@ -1,6 +1,6 @@
 ﻿[package]
 name = "eq2-tools"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "EverQuest II combat log parser with live DPS overlay (ACT-style)"
 

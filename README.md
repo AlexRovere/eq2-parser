@@ -100,7 +100,8 @@ cargo run --release --example parse_file -- "<chemin>\eq2log_X.txt"   # valider 
 
 ## Releases & mises à jour
 
-- **Publier une version** : bump `version` dans `Cargo.toml`, puis
+- **Publier une version** : bump `version` dans `Cargo.toml`, **ajouter une
+  entrée dans `CHANGELOG.md`** (affichée dans l'app après la mise à jour), puis
   `git tag vX.Y.Z && git push --tags` → GitHub Actions compile et attache
   l'exe à une GitHub Release.
 - **Côté utilisateur** : l'app vérifie les releases au lancement ; si une

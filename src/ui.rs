@@ -176,7 +176,12 @@ pub struct App {
     update_err_rx: Option<Receiver<String>>,
     update_error: Option<String>,
     updating: bool,
+    /// Fenêtre « Nouveautés » (changelog embarqué).
+    show_changelog: bool,
 }
+
+/// Changelog embarqué dans l'exécutable (mis à jour à chaque release).
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -193,6 +198,7 @@ impl App {
                 available_logs = discover_logs(&config.logs_dir);
             }
         }
+        let config_seen_version = config.last_seen_version.clone();
         // Auto-update : nettoie l'ancien exe et vérifie les releases GitHub.
         crate::update::cleanup_old();
         let (update_tx, update_rx) = std::sync::mpsc::channel();
@@ -237,6 +243,8 @@ impl App {
             update_err_rx: None,
             update_error: None,
             updating: false,
+            // Après une mise à jour (ou au premier lancement), montre les nouveautés.
+            show_changelog: config_seen_version != crate::update::CURRENT_VERSION,
         };
         // Attache automatique : le log le plus récemment écrit (perso actif),
         // sinon le dernier log suivi.
@@ -409,6 +417,63 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Fenêtre « ✨ Nouveautés » : changelog embarqué, affichée une fois
+    /// après chaque mise à jour (et au premier lancement).
+    fn show_changelog_window(&mut self, ctx: &egui::Context) {
+        if !self.show_changelog {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(format!(
+            "✨ Nouveautés — v{}",
+            crate::update::CURRENT_VERSION
+        ))
+        .id(egui::Id::new("changelog_window"))
+        .open(&mut open)
+        .collapsible(false)
+        .default_size([520.0, 420.0])
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for line in CHANGELOG.lines() {
+                    if line.starts_with("# ") {
+                        continue; // titre du fichier
+                    } else if let Some(h) = line.strip_prefix("## ") {
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(h)
+                                .size(16.0)
+                                .strong()
+                                .color(Color32::from_rgb(241, 196, 15)),
+                        );
+                        ui.add_space(2.0);
+                    } else if let Some(b) = line.strip_prefix("- ") {
+                        ui.label(format!("  •  {b}"));
+                    } else if !line.trim().is_empty() {
+                        ui.label(line);
+                    }
+                }
+                ui.add_space(8.0);
+            });
+            ui.separator();
+            ui.vertical_centered(|ui| {
+                if ui.button("C'est noté !").clicked() {
+                    self.show_changelog = false;
+                }
+            });
+        });
+        if !open {
+            self.show_changelog = false;
+        }
+        // Marque cette version comme vue (ne réapparaîtra pas).
+        if !self.show_changelog
+            && self.config.last_seen_version != crate::update::CURRENT_VERSION
+        {
+            self.config.last_seen_version = crate::update::CURRENT_VERSION.to_string();
+            self.config.save();
+        }
     }
 
     /// Toasts dans la fenêtre principale (les mêmes que sur l'overlay).
@@ -794,6 +859,7 @@ impl eframe::App for App {
         });
 
         self.show_main_toasts(ctx);
+        self.show_changelog_window(ctx);
 
         if self.config.overlay_enabled {
             self.show_overlay(ctx);
@@ -1716,6 +1782,9 @@ impl App {
             ));
             if ui.button("🔄 Vérifier maintenant").clicked() {
                 crate::update::spawn_check(self.update_tx.clone());
+            }
+            if ui.button("📋 Nouveautés").clicked() {
+                self.show_changelog = true;
             }
             match (&self.update_available, &self.update_error) {
                 (Some(info), _) => {

@@ -69,6 +69,8 @@ pub struct Config {
     pub history_cap: usize,
     /// Assignations manuelles : pet → propriétaire (prioritaires sur l'auto-détection).
     pub pet_assignments: HashMap<String, String>,
+    /// Dernière version dont les nouveautés ont été vues (fenêtre changelog).
+    pub last_seen_version: String,
 }
 
 impl Default for Config {
@@ -107,6 +109,7 @@ impl Default for Config {
             persist_history: true,
             history_cap: 500,
             pet_assignments: HashMap::new(),
+            last_seen_version: String::new(),
         }
     }
 }
