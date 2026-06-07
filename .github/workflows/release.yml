@@ -1,0 +1,32 @@
+name: release
+
+# Livraison : pousser un tag `vX.Y.Z` déclenche le build Windows
+# et publie l'exe en GitHub Release (téléchargée par l'auto-updater de l'app).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Publier la release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/eq2-tools.exe
+          generate_release_notes: true

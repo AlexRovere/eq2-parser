@@ -134,6 +134,13 @@ pub struct App {
     zone_cache: Option<(usize, String, Encounter)>,
     /// Nom saisi pour enregistrer un profil d'overlay.
     profile_name: String,
+    /// Mise à jour : canal de notification + état.
+    update_tx: std::sync::mpsc::Sender<crate::update::UpdateInfo>,
+    update_rx: Receiver<crate::update::UpdateInfo>,
+    update_available: Option<crate::update::UpdateInfo>,
+    update_err_rx: Option<Receiver<String>>,
+    update_error: Option<String>,
+    updating: bool,
 }
 
 impl App {
@@ -142,6 +149,12 @@ impl App {
         let trigger_engine = TriggerEngine::new(&config.triggers);
         let engine = CombatEngine::new(config.encounter_timeout);
         let available_logs = discover_logs(&config.logs_dir);
+        // Auto-update : nettoie l'ancien exe et vérifie les releases GitHub.
+        crate::update::cleanup_old();
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
+        if !cfg!(debug_assertions) {
+            crate::update::spawn_check(update_tx.clone());
+        }
         let mut app = Self {
             config,
             parser: None,
@@ -172,6 +185,12 @@ impl App {
             selected_zone: None,
             zone_cache: None,
             profile_name: String::new(),
+            update_tx,
+            update_rx,
+            update_available: None,
+            update_err_rx: None,
+            update_error: None,
+            updating: false,
         };
         // Réattache automatiquement le dernier log suivi.
         if let Some(last) = app.config.last_log.clone() {
@@ -479,6 +498,18 @@ impl eframe::App for App {
         self.engine.tick(Self::now_epoch());
         self.trigger_engine.tick();
 
+        // Notifications de mise à jour.
+        if let Ok(info) = self.update_rx.try_recv() {
+            self.update_available = Some(info);
+        }
+        if let Some(rx) = &self.update_err_rx {
+            if let Ok(err) = rx.try_recv() {
+                self.update_error = Some(err);
+                self.updating = false;
+                self.update_err_rx = None;
+            }
+        }
+
         // Auto-sauvegarde de l'historique : nouveaux encounters + throttle 20 s.
         if self.engine.history.len() != self.last_hist_len
             && self.last_hist_save.elapsed() > Duration::from_secs(20)
@@ -493,6 +524,43 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Triggers, "🔔 Triggers");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "⚙ Settings");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Bandeau de mise à jour.
+                    if self.updating {
+                        ui.label(
+                            RichText::new("⬇ Mise à jour en cours…")
+                                .color(Color32::from_rgb(241, 196, 15)),
+                        );
+                        ui.spinner();
+                    } else if let Some(info) = self.update_available.clone() {
+                        if ui
+                            .button(
+                                RichText::new(format!("✨ {} disponible — Mettre à jour", info.version))
+                                    .color(Color32::from_rgb(46, 204, 113)),
+                            )
+                            .on_hover_text(
+                                "Télécharge la nouvelle version, remplace l'exe et relance \
+                                 (config, triggers et historique conservés).",
+                            )
+                            .clicked()
+                        {
+                            self.updating = true;
+                            self.update_error = None;
+                            let (etx, erx) = std::sync::mpsc::channel();
+                            self.update_err_rx = Some(erx);
+                            std::thread::spawn(move || {
+                                if let Err(e) = crate::update::apply(&info.url) {
+                                    let _ = etx.send(e);
+                                }
+                            });
+                        }
+                    }
+                    if let Some(err) = &self.update_error {
+                        ui.label(
+                            RichText::new(format!("⚠ {err}"))
+                                .color(Color32::from_rgb(231, 76, 60)),
+                        )
+                        .on_hover_text("La mise à jour a échoué — l'app actuelle reste intacte.");
+                    }
                     let mut ov = self.config.overlay_enabled;
                     if ui.checkbox(&mut ov, "Overlay").changed() {
                         self.config.overlay_enabled = ov;
@@ -1340,6 +1408,40 @@ impl App {
         if changed {
             self.config.save();
         }
+
+        ui.separator();
+        ui.heading("Mises à jour");
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Version actuelle : v{}",
+                crate::update::CURRENT_VERSION
+            ));
+            if ui.button("🔄 Vérifier maintenant").clicked() {
+                crate::update::spawn_check(self.update_tx.clone());
+            }
+            match (&self.update_available, &self.update_error) {
+                (Some(info), _) => {
+                    ui.label(
+                        RichText::new(format!("✨ {} disponible (bouton en haut à droite)", info.version))
+                            .color(Color32::from_rgb(46, 204, 113)),
+                    );
+                }
+                (None, Some(err)) => {
+                    ui.label(RichText::new(format!("⚠ {err}")).color(Color32::from_rgb(231, 76, 60)));
+                }
+                _ => {
+                    ui.label(RichText::new("— à jour (ou vérification en cours)").weak());
+                }
+            }
+        });
+        ui.label(
+            RichText::new(format!(
+                "Les releases sont publiées sur github.com/{} — pousser un tag vX.Y.Z déclenche le build.",
+                crate::update::REPO
+            ))
+            .weak()
+            .small(),
+        );
     }
 }
 

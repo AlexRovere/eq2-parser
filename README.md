@@ -98,6 +98,18 @@ cargo test                     # tests unitaires du parser et du moteur
 cargo run --release --example parse_file -- "<chemin>\eq2log_X.txt"   # valider la couverture sur un log
 ```
 
+## Releases & mises à jour
+
+- **Publier une version** : bump `version` dans `Cargo.toml`, puis
+  `git tag vX.Y.Z && git push --tags` → GitHub Actions compile et attache
+  l'exe à une GitHub Release.
+- **Côté utilisateur** : l'app vérifie les releases au lancement ; si une
+  version plus récente existe, un bouton « ✨ vX.Y.Z disponible — Mettre à
+  jour » apparaît en haut à droite. Un clic télécharge le nouvel exe, le
+  remplace et relance l'app (config, triggers, profils et historique sont
+  conservés — ils vivent à côté de l'exe).
+- Vérification manuelle possible dans **Settings → Mises à jour**.
+
 ## Architecture
 
 ```

@@ -15,6 +15,7 @@ rodio = "0.19"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tts = "0.26"
+ureq = "2"
 
 [profile.release]
 lto = true

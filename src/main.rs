@@ -9,6 +9,7 @@ mod tailer;
 mod template;
 mod triggers;
 mod ui;
+mod update;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
