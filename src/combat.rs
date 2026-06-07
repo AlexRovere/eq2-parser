@@ -596,12 +596,14 @@ impl CombatEngine {
             }
             LogEvent::Kill { killer, victim } => {
                 if let Some(enc) = self.current.as_mut() {
-                    enc.end = epoch;
-                    enc.kills.push(victim.clone());
-                    let k = enc.combatants.entry(killer.clone()).or_default();
-                    k.kills += 1;
-                    if let Some(v) = enc.combatants.get_mut(victim) {
-                        v.deaths += 1;
+                    if epoch <= enc.end + self.timeout {
+                        enc.end = epoch;
+                        enc.kills.push(victim.clone());
+                        let k = enc.combatants.entry(killer.clone()).or_default();
+                        k.kills += 1;
+                        if let Some(v) = enc.combatants.get_mut(victim) {
+                            v.deaths += 1;
+                        }
                     }
                 }
             }
@@ -618,15 +620,17 @@ impl CombatEngine {
                     })
                     .unwrap_or_default();
                 if let Some(enc) = self.current.as_mut() {
-                    enc.end = epoch;
-                    enc.deaths_log.push(DeathRecord {
-                        epoch,
-                        victim: victim.clone(),
-                        killer: killer.clone(),
-                        hits,
-                    });
-                    let v = enc.combatants.entry(victim.clone()).or_default();
-                    v.deaths += 1;
+                    if epoch <= enc.end + self.timeout {
+                        enc.end = epoch;
+                        enc.deaths_log.push(DeathRecord {
+                            epoch,
+                            victim: victim.clone(),
+                            killer: killer.clone(),
+                            hits,
+                        });
+                        let v = enc.combatants.entry(victim.clone()).or_default();
+                        v.deaths += 1;
+                    }
                 }
                 self.recent_hits.remove(victim);
             }

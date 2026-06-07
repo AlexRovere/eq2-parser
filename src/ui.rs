@@ -382,6 +382,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_lines();
         self.engine.tick(Self::now_epoch());
+        self.trigger_engine.tick();
 
         // Auto-sauvegarde de l'historique : nouveaux encounters + throttle 20 s.
         if self.engine.history.len() != self.last_hist_len
@@ -595,7 +596,8 @@ impl App {
         });
         ui.label(
             RichText::new(
-                "Regex testée sur chaque ligne du log. Ex : `Verex N'Za says` ou `has been slain`",
+                "Regex testée sur chaque ligne du log. Groupes de capture : `(?<who>\\w+) casts` \
+                 puis `{who}` (ou `{1}`) dans le message/label. Ex : `has been slain by (?<killer>.+)!`",
             )
             .weak()
             .small(),
@@ -605,6 +607,7 @@ impl App {
         let mut changed = false;
         let mut to_remove: Option<usize> = None;
         let mut to_test: Option<Option<PathBuf>> = None;
+        let mut to_test_tts: Option<String> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, t) in self.config.triggers.iter_mut().enumerate() {
@@ -626,6 +629,48 @@ impl App {
                         if regex::Regex::new(&t.pattern).is_err() {
                             ui.label(RichText::new("regex invalide").color(Color32::RED));
                         }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Message :");
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut t.message)
+                                    .hint_text("toast/TTS — {1} ou {nom} = capture ; vide = nom du trigger")
+                                    .desired_width(340.0),
+                            )
+                            .changed();
+                        changed |= ui.checkbox(&mut t.tts, "🗣 TTS").changed();
+                        if ui.button("🔊 Test TTS").clicked() {
+                            let msg = if t.message.trim().is_empty() { &t.name } else { &t.message };
+                            to_test_tts = Some(msg.clone());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("⏱ Timer :");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut t.timer_secs)
+                                    .range(0..=3600)
+                                    .suffix(" s"),
+                            )
+                            .on_hover_text("0 = pas de timer ; sinon compte à rebours dans l'overlay")
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut t.timer_label)
+                                    .hint_text("label du timer ({nom} ok ; vide = nom)")
+                                    .desired_width(200.0),
+                            )
+                            .changed();
+                        ui.label("Cooldown :");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut t.cooldown_secs)
+                                    .range(0..=3600)
+                                    .suffix(" s"),
+                            )
+                            .on_hover_text("Ne pas re-déclencher pendant N secondes")
+                            .changed();
                     });
                     ui.horizontal(|ui| {
                         changed |= ui.checkbox(&mut t.show_toast, "Toast overlay").changed();
@@ -662,6 +707,9 @@ impl App {
 
         if let Some(s) = to_test {
             self.trigger_engine.test_sound(&s);
+        }
+        if let Some(msg) = to_test_tts {
+            self.trigger_engine.test_tts(&msg);
         }
         if let Some(i) = to_remove {
             self.config.triggers.remove(i);
@@ -1907,6 +1955,13 @@ impl App {
             .iter()
             .map(|t| t.text.clone())
             .collect();
+        // Timers déclenchés : (label, restant, total).
+        let timers: Vec<(String, f32, f32)> = self
+            .trigger_engine
+            .timers
+            .iter()
+            .map(|t| (t.label.clone(), t.remaining(), t.total))
+            .collect();
         let need_passthrough_cmd = !self.passthrough_sent;
 
         let cfg = &mut self.config;
@@ -2107,6 +2162,19 @@ impl App {
                                 &mut passthrough_toggled,
                             );
                             ui.separator();
+
+                            // Timers déclenchés (comptes à rebours).
+                            for (label, remaining, total) in &timers {
+                                bar_row(
+                                    ui,
+                                    &format!("⏱ {label}"),
+                                    &format!("{remaining:.0} s"),
+                                    remaining / total.max(1.0),
+                                    Color32::from_rgb(230, 126, 34),
+                                    Color32::WHITE,
+                                    s,
+                                );
+                            }
 
                             // Texte custom en haut (sous le titre).
                             if cfg.overlay_text_top {

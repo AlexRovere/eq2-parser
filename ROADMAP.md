@@ -28,13 +28,13 @@ Mis à jour : 2026-06-07.
 
 ## 🟠 À faire — priorité haute
 
-### Triggers avancés (la killer feature d'ACT)
-- [ ] **TTS** (synthèse vocale Windows — `Speech.Synthesis` via PowerShell spawn ou crate `tts`)
-- [ ] **Groupes de capture** dans le message du toast/TTS : pattern `(?<who>\w+) casts`
-      → message `{who} incante !`
-- [ ] **Timers déclenchés** : un trigger lance un compte à rebours nommé
-      (ex. « pop adds 30 s ») affiché dans l'overlay avec barre de progression
-- [ ] Cooldown de trigger (ne pas re-déclencher pendant N s)
+### Triggers avancés
+- [x] **TTS** (synthèse vocale WinRT via crate `tts`)
+- [x] **Groupes de capture** : `(?<who>\w+) casts` → message `{who} incante !`
+      (aussi `{1}`…`{9}` et `{0}` = match complet)
+- [x] **Timers déclenchés** : compte à rebours nommé dans l'overlay (barre orange),
+      toast + bip à expiration
+- [x] Cooldown de trigger (ne pas re-déclencher pendant N s)
 - [ ] Import/export de packs de triggers (partage communautaire, format XML ACT ?)
 
 ### Agrégat de session / zones
