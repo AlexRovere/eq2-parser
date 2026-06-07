@@ -48,6 +48,12 @@ pub struct Config {
     pub overlay_title_format: String,
     /// Afficher le texte custom en haut (sous le titre) plutôt qu'en bas.
     pub overlay_text_top: bool,
+    /// Position de l'overlay à l'écran (persistée).
+    pub overlay_pos: Option<(f32, f32)>,
+    /// Verrouiller la position/taille (pas de drag ni de resize accidentels).
+    pub overlay_locked: bool,
+    /// L'overlay devient quasi transparent quand la souris le survole.
+    pub overlay_fade_hover: bool,
     pub triggers: Vec<Trigger>,
     /// Profils d'overlay nommés (raid compact, solo détaillé…).
     pub overlay_profiles: Vec<OverlayProfile>,
@@ -90,6 +96,9 @@ impl Default for Config {
             overlay_bar_format: String::new(),
             overlay_title_format: String::new(),
             overlay_text_top: true,
+            overlay_pos: None,
+            overlay_locked: false,
+            overlay_fade_hover: true,
             triggers: Vec::new(),
             overlay_profiles: Vec::new(),
             merge_pets: true,

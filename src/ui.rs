@@ -13,6 +13,37 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Couleur stable par joueur (hash du nom) — identique partout :
+/// overlay, graphes, jauges des tables. Ne change pas avec le tri.
+fn player_color(name: &str) -> Color32 {
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    let hue = (h % 360) as f32 / 360.0;
+    egui::ecolor::Hsva::new(hue, 0.62, 0.86, 1.0).into()
+}
+
+/// Applique le thème de l'application (palette, arrondis, espacements).
+fn apply_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing.y = 6.0;
+    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    let v = &mut style.visuals;
+    v.panel_fill = Color32::from_rgb(16, 17, 22);
+    v.window_fill = Color32::from_rgb(20, 21, 27);
+    v.extreme_bg_color = Color32::from_rgb(11, 12, 16);
+    v.faint_bg_color = Color32::from_rgb(24, 25, 32);
+    v.selection.bg_fill = Color32::from_rgb(52, 152, 219).gamma_multiply(0.55);
+    v.hyperlink_color = Color32::from_rgb(93, 173, 226);
+    v.widgets.noninteractive.corner_radius = 4.into();
+    v.widgets.inactive.corner_radius = 4.into();
+    v.widgets.hovered.corner_radius = 4.into();
+    v.widgets.active.corner_radius = 4.into();
+    ctx.set_style(style);
+}
+
 const BAR_COLORS: [Color32; 10] = [
     Color32::from_rgb(231, 76, 60),
     Color32::from_rgb(241, 196, 15),
@@ -147,6 +178,7 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
         let mut config = Config::load();
         let trigger_engine = TriggerEngine::new(&config.triggers);
         let engine = CombatEngine::new(config.encounter_timeout);
@@ -303,6 +335,102 @@ impl App {
         let mut owners = self.engine.auto_pets.clone();
         owners.extend(self.config.pet_assignments.clone());
         owners
+    }
+
+    /// Écran d'accueil : guide l'utilisateur jusqu'au premier combat parsé.
+    fn ui_welcome(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.heading(RichText::new("⚔ EQ2 Tools").size(26.0));
+            ui.label(RichText::new("Combat parser & overlay pour EverQuest II").weak());
+            ui.add_space(20.0);
+
+            let ok = Color32::from_rgb(46, 204, 113);
+            let warn = Color32::from_rgb(241, 196, 15);
+            let step = |ui: &mut egui::Ui, done: bool, text: String| {
+                ui.label(
+                    RichText::new(format!("{}  {}", if done { "✅" } else { "⬜" }, text))
+                        .size(15.0)
+                        .color(if done { ok } else { warn }),
+                );
+                ui.add_space(6.0);
+            };
+
+            let dir_ok = !self.available_logs.is_empty();
+            step(
+                ui,
+                dir_ok,
+                if dir_ok {
+                    format!("Répertoire EQ2 trouvé : {}", self.config.logs_dir.display())
+                } else {
+                    "Répertoire EQ2 introuvable — Settings → 🔍 Détecter".to_string()
+                },
+            );
+
+            let attached = self.tailer.is_some();
+            step(
+                ui,
+                attached,
+                match (self.self_name(), &self.current_server) {
+                    (Some(n), s) if attached && !s.is_empty() => {
+                        format!("Personnage suivi : {n} @ {s}")
+                    }
+                    _ => "Aucun personnage suivi".to_string(),
+                },
+            );
+
+            let logging = self.lines_seen > 0;
+            step(
+                ui,
+                logging,
+                if logging {
+                    format!("Log actif — {} lignes lues", self.lines_seen)
+                } else {
+                    "En jeu, tape  /log  pour activer l'écriture du log".to_string()
+                },
+            );
+
+            ui.add_space(14.0);
+            ui.label(
+                RichText::new(
+                    "Dès ton premier combat, le DPS s'affiche ici et sur l'overlay.\n\
+                     Clic droit sur l'overlay pour le personnaliser.",
+                )
+                .weak(),
+            );
+            if !dir_ok && ui.button("🔍 Détecter l'installation EQ2").clicked() {
+                if let Some(dir) = crate::tailer::detect_logs_dir() {
+                    self.config.logs_dir = dir;
+                    self.available_logs = discover_logs(&self.config.logs_dir);
+                    self.config.save();
+                }
+            }
+        });
+    }
+
+    /// Toasts dans la fenêtre principale (les mêmes que sur l'overlay).
+    fn show_main_toasts(&self, ctx: &egui::Context) {
+        if self.trigger_engine.toasts.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("main_toasts"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                for t in &self.trigger_engine.toasts {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgba_unmultiplied(20, 21, 27, 240))
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(241, 196, 15)))
+                        .corner_radius(6.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("🔔 {}", t.text))
+                                    .color(Color32::from_rgb(241, 196, 15)),
+                            );
+                        });
+                }
+            });
     }
 
     /// Agrégat « session entière », mis en cache tant que l'historique ne change pas.
@@ -642,6 +770,8 @@ impl eframe::App for App {
             Tab::Settings => self.ui_settings(ui, ctx),
         });
 
+        self.show_main_toasts(ctx);
+
         if self.config.overlay_enabled {
             self.show_overlay(ctx);
         } else {
@@ -679,9 +809,7 @@ impl eframe::App for App {
 impl App {
     fn ui_live(&mut self, ui: &mut egui::Ui) {
         let Some(raw) = self.engine.display_encounter().cloned() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("En attente de combat…");
-            });
+            self.ui_welcome(ui);
             return;
         };
         let enc = self.for_display(&raw);
@@ -1442,6 +1570,14 @@ impl App {
                 );
             });
         }
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut self.config.overlay_locked, "🔒 Verrouiller position/taille")
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.config.overlay_fade_hover, "👻 Fondu au survol")
+                .changed();
+        });
         if ui
             .checkbox(
                 &mut self.config.overlay_click_through,
@@ -1705,6 +1841,7 @@ impl App {
             })
             .body(|mut body| {
                 let total = enc.total_damage().max(1);
+                let max_dmg = ranking.iter().map(|r| r.1.damage).max().unwrap_or(1).max(1);
                 for (name, c) in &ranking {
                     let is_self = self_name.as_deref() == Some(name.as_str());
                     let has_pets = c.abilities.keys().any(|k| k.starts_with("🐾"));
@@ -1730,25 +1867,27 @@ impl App {
                             self.pet_context_menu(&resp, enc, name);
                         });
                         row.col(|ui| {
-                            ui.label(fmt_num(c.damage));
+                            gauge_cell(
+                                ui,
+                                &fmt_num(c.damage),
+                                c.damage as f32 / max_dmg as f32,
+                                player_color(name),
+                            );
                         });
                         row.col(|ui| {
-                            ui.label(fmt_f64(enc.dps_of(c)));
+                            mono(ui, fmt_f64(enc.dps_of(c)));
                         });
                         row.col(|ui| {
-                            ui.label(format!(
-                                "{:.1}",
-                                c.damage as f64 / total as f64 * 100.0
-                            ));
+                            mono(ui, format!("{:.1}", c.damage as f64 / total as f64 * 100.0));
                         });
                         row.col(|ui| {
-                            ui.label(format!("{:.1}", c.crit_rate()));
+                            mono(ui, format!("{:.1}", c.crit_rate()));
                         });
                         row.col(|ui| {
-                            ui.label(fmt_num(c.max_hit));
+                            mono(ui, fmt_num(c.max_hit));
                         });
                         row.col(|ui| {
-                            ui.label(format!("{}", c.hits));
+                            mono(ui, format!("{}", c.hits));
                         });
                     });
                 }
@@ -1778,6 +1917,8 @@ impl App {
                     sortable_headers(&mut h, &["Nom", "Soins", "HPS", ""], &mut st_heal);
                 })
                 .body(|mut body| {
+                    let max_heal =
+                        heals.iter().map(|r| r.1.healing).max().unwrap_or(1).max(1);
                     for (name, c) in &heals {
                         body.row(18.0, |mut row| {
                             row.col(|ui| {
@@ -1792,10 +1933,15 @@ impl App {
                                 self.pet_context_menu(&resp, enc, name);
                             });
                             row.col(|ui| {
-                                ui.label(fmt_num(c.healing));
+                                gauge_cell(
+                                    ui,
+                                    &fmt_num(c.healing),
+                                    c.healing as f32 / max_heal as f32,
+                                    player_color(name),
+                                );
                             });
                             row.col(|ui| {
-                                ui.label(fmt_f64(enc.hps_of(c)));
+                                mono(ui, fmt_f64(enc.hps_of(c)));
                             });
                             row.col(|_| {});
                         });
@@ -1926,6 +2072,32 @@ fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
 
 fn matches_filter(name: &str, filter: &str) -> bool {
     filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
+}
+
+/// Cellule-jauge : barre de progression colorée derrière la valeur (à la ACT).
+fn gauge_cell(ui: &mut egui::Ui, text: &str, frac: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(80.0), 16.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 8));
+    let fill = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width() * frac.clamp(0.0, 1.0), rect.height()),
+    );
+    painter.rect_filled(fill, 2.0, color.gamma_multiply(0.45));
+    painter.text(
+        rect.right_center() - egui::vec2(4.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        egui::FontId::monospace(12.0),
+        Color32::WHITE,
+    );
+}
+
+fn mono(ui: &mut egui::Ui, text: String) {
+    ui.label(RichText::new(text).monospace());
 }
 
 fn safe_filename(s: &str) -> String {
@@ -2060,7 +2232,7 @@ fn graph_section(
                 }
             });
 
-            for (i, (name, c)) in candidates.iter().enumerate() {
+            for (name, c) in candidates.iter() {
                 if !state.selected.contains(name.as_str()) {
                     continue;
                 }
@@ -2074,7 +2246,7 @@ fn graph_section(
                 let pts = ys.iter().enumerate().map(|(t, y)| [t as f64, *y]).collect();
                 lines.push((
                     (*name).clone(),
-                    BAR_COLORS[i % BAR_COLORS.len()],
+                    player_color(name),
                     LineStyle::Solid,
                     pts,
                 ));
@@ -2092,7 +2264,7 @@ fn graph_section(
                     pcand.sort_by_key(|(_, c)| {
                         std::cmp::Reverse(metric_total(c, state.metric))
                     });
-                    for (i, (name, c)) in pcand.iter().enumerate() {
+                    for (name, c) in pcand.iter() {
                         if !state.selected.contains(name.as_str()) {
                             continue;
                         }
@@ -2107,7 +2279,7 @@ fn graph_section(
                             ys.iter().enumerate().map(|(t, y)| [t as f64, *y]).collect();
                         lines.push((
                             format!("{name} (épinglé)"),
-                            BAR_COLORS[i % BAR_COLORS.len()].gamma_multiply(0.7),
+                            player_color(name).gamma_multiply(0.6),
                             LineStyle::dashed_dense(),
                             pts,
                         ));
@@ -2194,6 +2366,21 @@ fn graph_section(
                         .color(color)
                         .style(style)
                         .width(1.8),
+                );
+            }
+            // Marqueurs de morts (croix rouges sur la ligne de base).
+            let death_pts: Vec<[f64; 2]> = enc
+                .deaths_log
+                .iter()
+                .filter(|d| enc.visible(&d.victim))
+                .map(|d| [d.epoch.saturating_sub(enc.start) as f64, 0.0])
+                .collect();
+            if !death_pts.is_empty() {
+                plot_ui.points(
+                    egui_plot::Points::new("💀 morts", PlotPoints::from(death_pts))
+                        .shape(egui_plot::MarkerShape::Cross)
+                        .radius(7.0)
+                        .color(Color32::from_rgb(231, 76, 60)),
                 );
             }
         });
@@ -2748,19 +2935,24 @@ impl App {
         let mut changed = false;
         let mut passthrough_toggled = false;
 
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("EQ2 Overlay")
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_resizable(true)
+            .with_min_inner_size([180.0, 60.0])
+            .with_inner_size([cfg.overlay_width, cfg.overlay_height]);
+        if let Some((x, y)) = cfg.overlay_pos {
+            builder = builder.with_position([x, y]);
+        }
+
         ctx.show_viewport_immediate(
             overlay_id,
-            egui::ViewportBuilder::default()
-                .with_title("EQ2 Overlay")
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_resizable(true)
-                .with_min_inner_size([180.0, 60.0])
-                .with_inner_size([cfg.overlay_width, cfg.overlay_height]),
+            builder,
             |ctx, _class| {
-                // Suit la taille réelle de la fenêtre (resize utilisateur via le grip).
+                // Suit la taille et la position réelles de la fenêtre.
                 let actual = ctx.input(|i| i.screen_rect().size());
                 if (actual.x - cfg.overlay_width).abs() > 1.0
                     || (actual.y - cfg.overlay_height).abs() > 1.0
@@ -2769,6 +2961,24 @@ impl App {
                     cfg.overlay_height = actual.y;
                     changed = true;
                 }
+                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    let pos = (rect.min.x, rect.min.y);
+                    if cfg
+                        .overlay_pos
+                        .is_none_or(|p| (p.0 - pos.0).abs() > 1.0 || (p.1 - pos.1).abs() > 1.0)
+                    {
+                        cfg.overlay_pos = Some(pos);
+                        changed = true;
+                    }
+                }
+                // Fondu au survol : on voit ce que l'overlay cache sans le déplacer.
+                let hovered = ctx.input(|i| i.pointer.has_pointer());
+                let fade = if cfg.overlay_fade_hover && hovered && !cfg.overlay_click_through
+                {
+                    0.25
+                } else {
+                    1.0
+                };
                 if need_passthrough_cmd {
                     ctx.send_viewport_cmd_to(
                         overlay_id,
@@ -2780,7 +2990,7 @@ impl App {
                     cfg.overlay_bg[0],
                     cfg.overlay_bg[1],
                     cfg.overlay_bg[2],
-                    (cfg.overlay_opacity * 235.0) as u8,
+                    (cfg.overlay_opacity * 235.0 * fade) as u8,
                 );
                 let accent = Color32::from_rgb(
                     cfg.overlay_accent[0],
@@ -2797,6 +3007,7 @@ impl App {
                             .inner_margin(8.0);
                         frame.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
+                            ui.set_opacity(fade);
 
                             // Barre de titre : drag + clic droit = réglages rapides,
                             // croix à droite pour masquer l'overlay.
@@ -2843,7 +3054,7 @@ impl App {
                                 ui.id().with("drag"),
                                 egui::Sense::click_and_drag(),
                             );
-                            if interact.dragged() {
+                            if interact.dragged() && !cfg.overlay_locked {
                                 ctx.send_viewport_cmd_to(
                                     overlay_id,
                                     egui::ViewportCommand::StartDrag,
@@ -2898,9 +3109,7 @@ impl App {
                                             .color(accent),
                                     );
                                 }
-                                for (i, (rank, name, value, frac, is_self)) in
-                                    sec.rows.iter().enumerate()
-                                {
+                                for (rank, name, value, frac, is_self) in &sec.rows {
                                     if ui.available_height() < row_h + reserved_bottom {
                                         continue 'sections;
                                     }
@@ -2909,7 +3118,7 @@ impl App {
                                         &format!("{rank}. {name}"),
                                         value,
                                         *frac,
-                                        BAR_COLORS[i % BAR_COLORS.len()],
+                                        player_color(name),
                                         if *is_self { accent } else { Color32::WHITE },
                                         s,
                                     );
@@ -2940,6 +3149,9 @@ impl App {
                         });
 
                         // Grip de redimensionnement (coin bas-droit), comme une fenêtre.
+                        if cfg.overlay_locked {
+                            return;
+                        }
                         let screen = ctx.screen_rect();
                         let grip = 16.0;
                         let grip_rect = egui::Rect::from_min_max(
@@ -3100,6 +3312,12 @@ fn overlay_quick_menu(
         });
         ui.separator();
 
+        *changed |= ui
+            .checkbox(&mut cfg.overlay_locked, "🔒 Verrouiller position/taille")
+            .changed();
+        *changed |= ui
+            .checkbox(&mut cfg.overlay_fade_hover, "👻 Fondu au survol de la souris")
+            .changed();
         if ui
             .checkbox(&mut cfg.overlay_click_through, "Click-through")
             .on_hover_text(
