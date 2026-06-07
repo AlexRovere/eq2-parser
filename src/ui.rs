@@ -117,6 +117,12 @@ pub struct App {
     /// Auto-sauvegarde de l'historique : état au dernier save.
     last_hist_len: usize,
     last_hist_save: Instant,
+    /// Tri par table : id → (colonne, descendant).
+    sort_states: HashMap<&'static str, (usize, bool)>,
+    /// Filtres texte.
+    filter_combatant: String,
+    filter_ability: String,
+    filter_encounters: String,
 }
 
 impl App {
@@ -145,6 +151,10 @@ impl App {
             current_server: String::new(),
             last_hist_len: 0,
             last_hist_save: Instant::now(),
+            sort_states: HashMap::new(),
+            filter_combatant: String::new(),
+            filter_ability: String::new(),
+            filter_encounters: String::new(),
         };
         // Réattache automatiquement le dernier log suivi.
         if let Some(last) = app.config.last_log.clone() {
@@ -278,7 +288,7 @@ impl App {
             self.encounter_table(ui, enc);
             if let Some(name) = self.selected_combatant.clone() {
                 ui.separator();
-                ability_breakdown(ui, enc, &name);
+                self.ability_breakdown(ui, enc, &name);
             }
             // Rapports de mort (alliés uniquement, sauf si les ennemis sont affichés).
             let deaths: Vec<&crate::combat::DeathRecord> = enc
@@ -306,7 +316,9 @@ impl App {
                 ))
                 .default_open(true)
                 .show(ui, |ui| {
-                    comparison_table(ui, p, enc);
+                    let mut st = *self.sort_states.entry("cmp").or_insert((2, true));
+                    comparison_table(ui, p, enc, &mut st);
+                    self.sort_states.insert("cmp", st);
                 });
             }
             ui.separator();
@@ -484,7 +496,9 @@ impl App {
             .default_width(260.0)
             .show_inside(ui, |ui| {
                 ui.heading("Historique");
+                filter_box(ui, &mut self.filter_encounters, "filtrer par nom de mob…");
                 ui.separator();
+                let filter = self.filter_encounters.clone();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.engine.current.is_some() {
                         let sel = self.selected_encounter.is_none();
@@ -493,7 +507,13 @@ impl App {
                             self.selected_combatant = None;
                         }
                     }
+                    let mut shown = 0;
+                    let mut selected: Option<usize> = None;
                     for (i, enc) in self.engine.history.iter().enumerate().rev() {
+                        if !matches_filter(&enc.title(), &filter) {
+                            continue;
+                        }
+                        shown += 1;
                         let label = format!(
                             "{} — {} ({})",
                             enc.title(),
@@ -502,11 +522,14 @@ impl App {
                         );
                         let sel = self.selected_encounter == Some(i);
                         if ui.selectable_label(sel, label).clicked() {
-                            self.selected_encounter = Some(i);
-                            self.selected_combatant = None;
+                            selected = Some(i);
                         }
                     }
-                    if self.engine.history.is_empty() && self.engine.current.is_none() {
+                    if let Some(i) = selected {
+                        self.selected_encounter = Some(i);
+                        self.selected_combatant = None;
+                    }
+                    if shown == 0 && self.engine.current.is_none() {
                         ui.label(RichText::new("(vide)").weak());
                     }
                 });
@@ -1041,16 +1064,36 @@ impl App {
     fn encounter_table(&mut self, ui: &mut egui::Ui, enc: &Encounter) {
         use egui_extras::{Column, TableBuilder};
         let self_name = self.self_name().map(|s| s.to_string());
-        let ranking: Vec<(String, crate::combat::Combatant)> = enc
+
+        let filter = self.filter_combatant.clone();
+        filter_box(ui, &mut self.filter_combatant, "filtrer les combattants…");
+
+        let mut ranking: Vec<(String, crate::combat::Combatant)> = enc
             .damage_ranking()
             .into_iter()
+            .filter(|(n, _)| matches_filter(n, &filter))
             .map(|(n, c)| (n.clone(), c.clone()))
             .collect();
-        let heals: Vec<(String, crate::combat::Combatant)> = enc
+        let mut heals: Vec<(String, crate::combat::Combatant)> = enc
             .heal_ranking()
             .into_iter()
+            .filter(|(n, _)| matches_filter(n, &filter))
             .map(|(n, c)| (n.clone(), c.clone()))
             .collect();
+
+        let mut st_dmg = *self.sort_states.entry("dmg").or_insert((1, true));
+        sort_rows(
+            &mut ranking,
+            st_dmg,
+            |r| r.0.clone(),
+            |r, col| match col {
+                1 | 2 | 3 => r.1.damage as f64,
+                4 => r.1.crit_rate(),
+                5 => r.1.max_hit as f64,
+                6 => r.1.hits as f64,
+                _ => 0.0,
+            },
+        );
 
         ui.label(RichText::new("Dégâts").strong());
         TableBuilder::new(ui)
@@ -1064,11 +1107,11 @@ impl App {
             .column(Column::auto().at_least(80.0))
             .column(Column::remainder())
             .header(20.0, |mut h| {
-                for t in ["Nom", "Dégâts", "DPS", "%", "Crit %", "Max hit", "Hits"] {
-                    h.col(|ui| {
-                        ui.label(RichText::new(t).strong());
-                    });
-                }
+                sortable_headers(
+                    &mut h,
+                    &["Nom", "Dégâts", "DPS", "%", "Crit %", "Max hit", "Hits"],
+                    &mut st_dmg,
+                );
             })
             .body(|mut body| {
                 let total = enc.total_damage().max(1);
@@ -1121,6 +1164,15 @@ impl App {
                 }
             });
 
+        self.sort_states.insert("dmg", st_dmg);
+
+        let mut st_heal = *self.sort_states.entry("heal").or_insert((1, true));
+        sort_rows(
+            &mut heals,
+            st_heal,
+            |r| r.0.clone(),
+            |r, _| r.1.healing as f64,
+        );
         if !heals.is_empty() {
             ui.add_space(8.0);
             ui.label(RichText::new("Soins (heals + wards)").strong());
@@ -1132,11 +1184,7 @@ impl App {
                 .column(Column::auto().at_least(80.0))
                 .column(Column::remainder())
                 .header(20.0, |mut h| {
-                    for t in ["Nom", "Soins", "HPS", ""] {
-                        h.col(|ui| {
-                            ui.label(RichText::new(t).strong());
-                        });
-                    }
+                    sortable_headers(&mut h, &["Nom", "Soins", "HPS", ""], &mut st_heal);
                 })
                 .body(|mut body| {
                     for (name, c) in &heals {
@@ -1164,11 +1212,21 @@ impl App {
                 });
         }
 
-        let power: Vec<(String, crate::combat::Combatant)> = enc
+        self.sort_states.insert("heal", st_heal);
+
+        let mut power: Vec<(String, crate::combat::Combatant)> = enc
             .power_ranking()
             .into_iter()
+            .filter(|(n, _)| matches_filter(n, &filter))
             .map(|(n, c)| (n.clone(), c.clone()))
             .collect();
+        let mut st_power = *self.sort_states.entry("power").or_insert((1, true));
+        sort_rows(
+            &mut power,
+            st_power,
+            |r| r.0.clone(),
+            |r, _| r.1.power as f64,
+        );
         if !power.is_empty() {
             ui.add_space(8.0);
             ui.label(RichText::new("Power replenish").strong());
@@ -1180,11 +1238,7 @@ impl App {
                 .column(Column::auto().at_least(80.0))
                 .column(Column::remainder())
                 .header(20.0, |mut h| {
-                    for t in ["Nom", "Power", "Power/s", ""] {
-                        h.col(|ui| {
-                            ui.label(RichText::new(t).strong());
-                        });
-                    }
+                    sortable_headers(&mut h, &["Nom", "Power", "Power/s", ""], &mut st_power);
                 })
                 .body(|mut body| {
                     for (name, c) in &power {
@@ -1211,7 +1265,75 @@ impl App {
                     }
                 });
         }
+        self.sort_states.insert("power", st_power);
     }
+}
+
+/// En-têtes de table cliquables : clic = trier, re-clic = inverser.
+fn sortable_headers(
+    h: &mut egui_extras::TableRow<'_, '_>,
+    labels: &[&str],
+    st: &mut (usize, bool),
+) {
+    for (i, t) in labels.iter().enumerate() {
+        h.col(|ui| {
+            if t.is_empty() {
+                return;
+            }
+            let active = st.0 == i;
+            let arrow = if active {
+                if st.1 { " ⏷" } else { " ⏶" }
+            } else {
+                ""
+            };
+            if ui
+                .selectable_label(active, RichText::new(format!("{t}{arrow}")).strong())
+                .clicked()
+            {
+                if active {
+                    st.1 = !st.1;
+                } else {
+                    // Numérique : descendant par défaut ; nom : ascendant.
+                    *st = (i, i != 0);
+                }
+            }
+        });
+    }
+}
+
+/// Trie des lignes (nom, valeur de tri par colonne) selon l'état de tri.
+fn sort_rows<T>(rows: &mut [T], st: (usize, bool), name: impl Fn(&T) -> String, key: impl Fn(&T, usize) -> f64) {
+    if st.0 == 0 {
+        rows.sort_by(|a, b| name(a).to_lowercase().cmp(&name(b).to_lowercase()));
+    } else {
+        rows.sort_by(|a, b| {
+            key(a, st.0)
+                .partial_cmp(&key(b, st.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    if st.1 {
+        rows.reverse();
+    }
+}
+
+/// Champ de filtre texte compact avec bouton d'effacement.
+fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
+    ui.horizontal(|ui| {
+        ui.label("🔎");
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .hint_text(hint)
+                .desired_width(180.0),
+        );
+        if !text.is_empty() && ui.small_button("✖").clicked() {
+            text.clear();
+        }
+    });
+}
+
+fn matches_filter(name: &str, filter: &str) -> bool {
+    filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
 }
 
 fn safe_filename(s: &str) -> String {
@@ -1553,7 +1675,12 @@ fn deaths_default_open(enc: &Encounter) -> bool {
 }
 
 /// Table de comparaison : encounter épinglé (A) vs affiché (B).
-fn comparison_table(ui: &mut egui::Ui, pinned: &Encounter, current: &Encounter) {
+fn comparison_table(
+    ui: &mut egui::Ui,
+    pinned: &Encounter,
+    current: &Encounter,
+    st: &mut (usize, bool),
+) {
     use egui_extras::{Column, TableBuilder};
 
     ui.label(
@@ -1568,7 +1695,7 @@ fn comparison_table(ui: &mut egui::Ui, pinned: &Encounter, current: &Encounter) 
         .small(),
     );
 
-    // Union des combattants, ordonnés par DPS de l'encounter affiché.
+    // Union des combattants : (nom, dps A, dps B).
     let mut names: Vec<String> = current
         .damage_ranking()
         .iter()
@@ -1580,6 +1707,28 @@ fn comparison_table(ui: &mut egui::Ui, pinned: &Encounter, current: &Encounter) 
         }
     }
     names.truncate(15);
+    let mut rows: Vec<(String, Option<f64>, Option<f64>)> = names
+        .into_iter()
+        .map(|name| {
+            let a = pinned.combatants.get(&name).map(|c| pinned.dps_of(c));
+            let b = current.combatants.get(&name).map(|c| current.dps_of(c));
+            (name, a, b)
+        })
+        .collect();
+    sort_rows(
+        &mut rows,
+        *st,
+        |r| r.0.clone(),
+        |r, col| match col {
+            1 => r.1.unwrap_or(-1.0),
+            2 => r.2.unwrap_or(-1.0),
+            3 => match (r.1, r.2) {
+                (Some(a), Some(b)) if a > 0.0 => (b - a) / a,
+                _ => f64::NEG_INFINITY,
+            },
+            _ => 0.0,
+        },
+    );
 
     TableBuilder::new(ui)
         .id_salt("cmp_table")
@@ -1590,16 +1739,15 @@ fn comparison_table(ui: &mut egui::Ui, pinned: &Encounter, current: &Encounter) 
         .column(Column::auto().at_least(80.0))
         .column(Column::remainder())
         .header(20.0, |mut h| {
-            for t in ["Nom", "DPS A (épinglé)", "DPS B (affiché)", "Δ %", ""] {
-                h.col(|ui| {
-                    ui.label(RichText::new(t).strong());
-                });
-            }
+            sortable_headers(
+                &mut h,
+                &["Nom", "DPS A (épinglé)", "DPS B (affiché)", "Δ %", ""],
+                st,
+            );
         })
         .body(|mut body| {
-            for name in &names {
-                let a = pinned.combatants.get(name).map(|c| pinned.dps_of(c));
-                let b = current.combatants.get(name).map(|c| current.dps_of(c));
+            for (name, a, b) in &rows {
+                let (a, b) = (*a, *b);
                 body.row(18.0, |mut row| {
                     row.col(|ui| {
                         ui.label(name);
@@ -1632,14 +1780,42 @@ fn comparison_table(ui: &mut egui::Ui, pinned: &Encounter, current: &Encounter) 
         });
 }
 
-fn ability_breakdown(ui: &mut egui::Ui, enc: &Encounter, name: &str) {
+impl App {
+    fn ability_breakdown(&mut self, ui: &mut egui::Ui, enc: &Encounter, name: &str) {
     use egui_extras::{Column, TableBuilder};
     let Some(c) = enc.combatants.get(name) else { return };
-    ui.label(RichText::new(format!("Breakdown — {name}")).strong());
-    let mut abilities: Vec<_> = c.abilities.iter().collect();
-    abilities.sort_by(|a, b| {
-        (b.1.damage + b.1.healing + b.1.power).cmp(&(a.1.damage + a.1.healing + a.1.power))
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Breakdown — {name}")).strong());
+        filter_box(ui, &mut self.filter_ability, "filtrer les sorts…");
     });
+    let filter = self.filter_ability.clone();
+    let mut abilities: Vec<_> = c
+        .abilities
+        .iter()
+        .filter(|(n, _)| matches_filter(n, &filter))
+        .collect();
+    let mut st = *self.sort_states.entry("ability").or_insert((4, true));
+    sort_rows(
+        &mut abilities,
+        st,
+        |r| r.0.clone(),
+        |r, col| match col {
+            1 => r.1.damage as f64,
+            2 => r.1.healing as f64,
+            3 => r.1.power as f64,
+            4 => (r.1.damage + r.1.healing + r.1.power) as f64,
+            5 => r.1.hits as f64,
+            6 => {
+                if r.1.hits == 0 {
+                    0.0
+                } else {
+                    r.1.crits as f64 / r.1.hits as f64
+                }
+            }
+            7 => r.1.max_hit as f64,
+            _ => 0.0,
+        },
+    );
     let total = (c.damage + c.healing + c.power).max(1);
 
     TableBuilder::new(ui)
@@ -1654,11 +1830,11 @@ fn ability_breakdown(ui: &mut egui::Ui, enc: &Encounter, name: &str) {
         .column(Column::auto().at_least(80.0))
         .column(Column::remainder())
         .header(20.0, |mut h| {
-            for t in ["Sort / CA", "Dégâts", "Soins", "Power", "%", "Hits", "Crit %", "Max"] {
-                h.col(|ui| {
-                    ui.label(RichText::new(t).strong());
-                });
-            }
+            sortable_headers(
+                &mut h,
+                &["Sort / CA", "Dégâts", "Soins", "Power", "%", "Hits", "Crit %", "Max"],
+                &mut st,
+            );
         })
         .body(|mut body| {
             for (ab_name, ab) in abilities {
@@ -1699,6 +1875,8 @@ fn ability_breakdown(ui: &mut egui::Ui, enc: &Encounter, name: &str) {
                 });
             }
         });
+    self.sort_states.insert("ability", st);
+    }
 }
 
 // ---------------------------------------------------------------------------

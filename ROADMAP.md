@@ -56,8 +56,9 @@ Mis à jour : 2026-06-07.
 - [ ] Resists par école de magie
 
 ### Confort UI
-- [ ] Tables triables par clic sur l'en-tête de colonne
-- [ ] Recherche/filtre dans l'historique des encounters
+- [x] Tables triables par clic sur l'en-tête de colonne (dégâts, soins, power,
+      breakdown par sort, comparaison)
+- [x] Filtres texte : combattants, sorts, historique des encounters
 - [ ] Vue « log brut » d'un encounter (les lignes sources, filtrables)
 - [ ] Profils d'overlay commutables (raid compact / solo détaillé)
 
