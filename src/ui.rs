@@ -963,6 +963,14 @@ impl App {
     }
 
     fn ui_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::ScrollArea::vertical()
+            .id_salt("settings_scroll")
+            .show(ui, |ui| {
+                self.ui_settings_inner(ui, ctx);
+            });
+    }
+
+    fn ui_settings_inner(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Fichier de log");
         ui.horizontal(|ui| {
             ui.label("Répertoire logs EQ2 :");
@@ -1221,6 +1229,30 @@ impl App {
                 "Afficher le texte en haut (sous le titre) plutôt qu'en bas",
             )
             .changed();
+        ui.horizontal(|ui| {
+            ui.label("Format des barres :");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.config.overlay_bar_format)
+                        .hint_text("vide = auto « 4691 (93.8k · 52.8%) » · ex : {{dps}} · {{pct}}")
+                        .desired_width(300.0)
+                        .font(egui::TextStyle::Monospace),
+                )
+                .on_hover_text(
+                    "Texte de droite de chaque barre — variables résolues sur le joueur \
+                     de la barre ({{dps}}, {{dmg}}, {{pct}}, {{crit}}, {{maxhit}}…).",
+                )
+                .changed();
+            ui.label("Format du titre :");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.config.overlay_title_format)
+                        .hint_text("vide = auto · ex : {{target}} — {{time}} | raid {{raiddps}}")
+                        .desired_width(300.0)
+                        .font(egui::TextStyle::Monospace),
+                )
+                .changed();
+        });
         // Aperçu live sur l'encounter affiché.
         if !self.config.overlay_custom_text.trim().is_empty() {
             let enc = self
@@ -1454,6 +1486,7 @@ impl App {
         TableBuilder::new(ui)
             .id_salt("dmg_table")
             .striped(true)
+            .vscroll(false)
             .column(Column::auto().at_least(160.0))
             .column(Column::auto().at_least(80.0))
             .column(Column::auto().at_least(80.0))
@@ -1534,6 +1567,7 @@ impl App {
             TableBuilder::new(ui)
                 .id_salt("heal_table")
                 .striped(true)
+                .vscroll(false)
                 .column(Column::auto().at_least(160.0))
                 .column(Column::auto().at_least(80.0))
                 .column(Column::auto().at_least(80.0))
@@ -1588,6 +1622,7 @@ impl App {
             TableBuilder::new(ui)
                 .id_salt("power_table")
                 .striped(true)
+                .vscroll(false)
                 .column(Column::auto().at_least(160.0))
                 .column(Column::auto().at_least(80.0))
                 .column(Column::auto().at_least(80.0))
@@ -1982,6 +2017,7 @@ fn death_report(ui: &mut egui::Ui, enc: &Encounter, d: &crate::combat::DeathReco
         TableBuilder::new(ui)
             .id_salt(("death_table", idx))
             .striped(true)
+            .vscroll(false)
             .column(Column::auto().at_least(60.0))
             .column(Column::auto().at_least(160.0))
             .column(Column::auto().at_least(200.0))
@@ -2088,6 +2124,7 @@ fn comparison_table(
     TableBuilder::new(ui)
         .id_salt("cmp_table")
         .striped(true)
+        .vscroll(false)
         .column(Column::auto().at_least(160.0))
         .column(Column::auto().at_least(90.0))
         .column(Column::auto().at_least(90.0))
@@ -2176,6 +2213,7 @@ impl App {
     TableBuilder::new(ui)
         .id_salt("ability_table")
         .striped(true)
+        .vscroll(false)
         .column(Column::auto().at_least(220.0))
         .column(Column::auto().at_least(90.0))
         .column(Column::auto().at_least(60.0))
@@ -2336,8 +2374,8 @@ fn target_table(ui: &mut egui::Ui, title: &str, map: &std::collections::BTreeMap
 /// Une section de barres de l'overlay (DPS, HPS ou Power), pré-calculée.
 struct OverlaySection {
     label: &'static str,
-    /// (rang dans le classement, nom, valeur/s, total, est_soi)
-    rows: Vec<(usize, String, f64, u64, bool)>,
+    /// (rang dans le classement, nom, texte de droite pré-rendu, fraction de barre, est_soi)
+    rows: Vec<(usize, String, String, f32, bool)>,
 }
 
 impl App {
@@ -2370,26 +2408,42 @@ impl App {
         let s = cfg.overlay_scale.clamp(0.6, 2.5);
         let rows_max = cfg.overlay_rows;
 
-        // Pré-calcul des sections affichées.
+        // Pré-calcul des sections affichées. Le texte de droite de chaque barre
+        // est soit le format auto « 4691 (93.8k · 52.8%) », soit le template
+        // custom rendu sur le joueur de la barre.
+        let bar_format = cfg.overlay_bar_format.trim().to_string();
         let mut sections: Vec<OverlaySection> = Vec::new();
         if let Some(e) = &enc {
             let mk = |ranking: Vec<(&String, &crate::combat::Combatant)>,
                       per_sec: &dyn Fn(&crate::combat::Combatant) -> f64,
                       total: &dyn Fn(&crate::combat::Combatant) -> u64|
-             -> Vec<(usize, String, f64, u64, bool)> {
-                let mut rows: Vec<(usize, String, f64, u64, bool)> = ranking
+             -> Vec<(usize, String, String, f32, bool)> {
+                let sec_total: u64 = ranking.iter().map(|(_, c)| total(c)).sum::<u64>().max(1);
+                let top = ranking.first().map(|(_, c)| total(c)).unwrap_or(1).max(1);
+                let mk_row = |rank: usize, n: &String, c: &crate::combat::Combatant| {
+                    let value = if bar_format.is_empty() {
+                        format!(
+                            "{}  ({} · {:.1}%)",
+                            fmt_f64(per_sec(c)),
+                            fmt_num(total(c)),
+                            total(c) as f64 / sec_total as f64 * 100.0
+                        )
+                    } else {
+                        crate::template::render(&bar_format, Some(e), Some(n.as_str()))
+                    };
+                    (
+                        rank,
+                        n.clone(),
+                        value,
+                        (total(c) as f64 / top as f64) as f32,
+                        self_name.as_deref() == Some(n.as_str()),
+                    )
+                };
+                let mut rows: Vec<(usize, String, String, f32, bool)> = ranking
                     .iter()
                     .take(rows_max)
                     .enumerate()
-                    .map(|(i, (n, c))| {
-                        (
-                            i + 1,
-                            (*n).clone(),
-                            per_sec(c),
-                            total(c),
-                            self_name.as_deref() == Some(n.as_str()),
-                        )
-                    })
+                    .map(|(i, (n, c))| mk_row(i + 1, n, c))
                     .collect();
                 // Si je suis hors du top affiché, ma ligne remplace la dernière
                 // barre (avec mon vrai rang) — on doit toujours se voir.
@@ -2399,7 +2453,7 @@ impl App {
                         if pos >= rows_max && rows_max > 0 {
                             let (n, c) = ranking[pos];
                             if let Some(last) = rows.last_mut() {
-                                *last = (pos + 1, n.clone(), per_sec(c), total(c), true);
+                                *last = mk_row(pos + 1, n, c);
                             }
                         }
                     }
@@ -2427,8 +2481,15 @@ impl App {
             sections.retain(|sec| !sec.rows.is_empty());
         }
 
-        // Barre de titre.
-        let title = match &enc {
+        // Barre de titre : template custom si défini, sinon format auto.
+        let title = if !cfg.overlay_title_format.trim().is_empty() {
+            crate::template::render(
+                &cfg.overlay_title_format,
+                enc.as_ref(),
+                self_name.as_deref(),
+            )
+        } else {
+            match &enc {
             Some(e) => {
                 let base = format!(
                     "{} — {}{}",
@@ -2453,6 +2514,7 @@ impl App {
                 }
             }
             None => "EQ2 Tools — en attente".to_string(),
+            }
         };
 
         // Texte custom : rendu du template ({{dps}}, {{hps:1}}, …) sur l'encounter affiché.
@@ -2633,8 +2695,7 @@ impl App {
                                             .color(accent),
                                     );
                                 }
-                                let top = sec.rows.first().map(|r| r.3).unwrap_or(1).max(1);
-                                for (i, (rank, name, per_sec, total, is_self)) in
+                                for (i, (rank, name, value, frac, is_self)) in
                                     sec.rows.iter().enumerate()
                                 {
                                     if ui.available_height() < row_h + reserved_bottom {
@@ -2643,8 +2704,8 @@ impl App {
                                     bar_row(
                                         ui,
                                         &format!("{rank}. {name}"),
-                                        &format!("{}  ({})", fmt_f64(*per_sec), fmt_num(*total)),
-                                        (*total as f64 / top as f64) as f32,
+                                        value,
+                                        *frac,
                                         BAR_COLORS[i % BAR_COLORS.len()],
                                         if *is_self { accent } else { Color32::WHITE },
                                         s,
@@ -2810,6 +2871,30 @@ fn overlay_quick_menu(
         *changed |= ui
             .checkbox(&mut cfg.overlay_text_top, "Texte en haut (sous le titre)")
             .changed();
+        ui.horizontal(|ui| {
+            ui.label("Barres :");
+            *changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut cfg.overlay_bar_format)
+                        .hint_text("vide = auto · ex : {{dps}} · {{pct}}")
+                        .desired_width(190.0),
+                )
+                .on_hover_text(
+                    "Côté droit de chaque barre. Variables résolues sur le joueur \
+                     de la barre : {{dps}} {{dmg}} {{pct}} {{crit}}…",
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Titre :");
+            *changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut cfg.overlay_title_format)
+                        .hint_text("vide = auto · ex : {{target}} {{time}} | {{raiddps}}")
+                        .desired_width(190.0),
+                )
+                .changed();
+        });
         ui.separator();
 
         if ui

@@ -39,6 +39,11 @@ pub struct Config {
     pub overlay_title_stats: bool,
     /// Ligne de texte libre (template à variables) de l'overlay.
     pub overlay_custom_text: String,
+    /// Format custom du côté droit des barres (template, vide = auto
+    /// « 4691 (93.8k · 52.8%) »). Variables résolues sur le joueur de la barre.
+    pub overlay_bar_format: String,
+    /// Format custom de la barre de titre (template, vide = auto).
+    pub overlay_title_format: String,
     /// Afficher le texte custom en haut (sous le titre) plutôt qu'en bas.
     pub overlay_text_top: bool,
     pub triggers: Vec<Trigger>,
@@ -79,6 +84,8 @@ impl Default for Config {
             overlay_show_power: false,
             overlay_title_stats: true,
             overlay_custom_text: String::new(),
+            overlay_bar_format: String::new(),
+            overlay_title_format: String::new(),
             overlay_text_top: true,
             triggers: Vec::new(),
             overlay_profiles: Vec::new(),
@@ -110,6 +117,8 @@ pub struct OverlayProfile {
     pub show_power: bool,
     pub title_stats: bool,
     pub custom_text: String,
+    pub bar_format: String,
+    pub title_format: String,
     pub text_top: bool,
 }
 
@@ -131,6 +140,8 @@ impl Default for OverlayProfile {
             show_power: c.overlay_show_power,
             title_stats: c.overlay_title_stats,
             custom_text: c.overlay_custom_text,
+            bar_format: c.overlay_bar_format,
+            title_format: c.overlay_title_format,
             text_top: c.overlay_text_top,
         }
     }
@@ -154,6 +165,8 @@ impl Config {
             show_power: self.overlay_show_power,
             title_stats: self.overlay_title_stats,
             custom_text: self.overlay_custom_text.clone(),
+            bar_format: self.overlay_bar_format.clone(),
+            title_format: self.overlay_title_format.clone(),
             text_top: self.overlay_text_top,
         }
     }
@@ -173,6 +186,8 @@ impl Config {
         self.overlay_show_power = p.show_power;
         self.overlay_title_stats = p.title_stats;
         self.overlay_custom_text = p.custom_text.clone();
+        self.overlay_bar_format = p.bar_format.clone();
+        self.overlay_title_format = p.title_format.clone();
         self.overlay_text_top = p.text_top;
     }
 }

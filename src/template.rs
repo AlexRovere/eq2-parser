@@ -18,6 +18,8 @@ pub const VARIABLES: &[(&str, &str)] = &[
     ("{{dmg}}", "tes dégâts totaux"),
     ("{{heal}}", "tes soins totaux"),
     ("{{power}}", "ton power total rendu"),
+    ("{{pct}}", "ta part des dégâts du combat (%)"),
+    ("{{pcth}}", "ta part des soins du combat (%)"),
     ("{{crit}}", "ton taux de critique"),
     ("{{maxhit}}", "ton plus gros coup"),
     ("{{rank}}", "ton rang au classement dégâts"),
@@ -114,6 +116,15 @@ pub fn render(template: &str, enc: Option<&Encounter>, self_name: Option<&str>) 
             "heal" | "soins" => fmt_num(c.healing),
             "power" => fmt_num(c.power),
             "crit" => format!("{:.1}%", c.crit_rate()),
+            // Part des dégâts/soins parmi les combattants visibles.
+            "pct" | "pctdmg" => {
+                let total: u64 = e.damage_ranking().iter().map(|(_, c)| c.damage).sum();
+                format!("{:.1}%", c.damage as f64 / total.max(1) as f64 * 100.0)
+            }
+            "pcth" | "pcthps" => {
+                let total: u64 = e.heal_ranking().iter().map(|(_, c)| c.healing).sum();
+                format!("{:.1}%", c.healing as f64 / total.max(1) as f64 * 100.0)
+            }
             "maxhit" | "max" => fmt_num(c.max_hit),
             "taken" | "subis" => fmt_num(c.damage_taken),
             "deaths" | "morts" => c.deaths.to_string(),
