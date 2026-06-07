@@ -25,6 +25,8 @@ pub struct Config {
     pub overlay_scale: f32,
     /// Largeur de l'overlay en points.
     pub overlay_width: f32,
+    /// Hauteur de l'overlay en points (redimensionnable via le grip).
+    pub overlay_height: f32,
     /// Couleur de fond (RGB) — l'alpha vient de `overlay_opacity`.
     pub overlay_bg: [u8; 3],
     /// Couleur d'accent (ton personnage, texte custom).
@@ -57,6 +59,7 @@ impl Default for Config {
             overlay_rows: 8,
             overlay_scale: 1.0,
             overlay_width: 340.0,
+            overlay_height: 240.0,
             overlay_bg: [12, 12, 18],
             overlay_accent: [241, 196, 15],
             overlay_show_dps: true,

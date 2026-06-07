@@ -695,23 +695,22 @@ impl App {
             changed |= ui
                 .add(
                     egui::Slider::new(&mut self.config.overlay_scale, 0.6..=2.0)
-                        .text("Taille"),
+                        .text("Taille du texte"),
                 )
                 .changed();
         });
         ui.horizontal(|ui| {
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut self.config.overlay_width, 240.0..=640.0)
-                        .text("Largeur"),
-                )
-                .changed();
-            changed |= ui
-                .add(
                     egui::Slider::new(&mut self.config.overlay_rows, 3..=15)
                         .text("Barres max"),
                 )
                 .changed();
+            ui.label(
+                RichText::new("(taille : grip ↘ en bas à droite de l'overlay)")
+                    .weak()
+                    .small(),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Couleur de fond :");
@@ -1563,18 +1562,10 @@ impl App {
             None => "EQ2 Tools — en attente".to_string(),
         };
 
-        // Hauteur dynamique selon le contenu.
+        // Espace réservé en bas (texte custom + toasts) pour l'auto-fit des barres.
         let row_h = 20.0 * s;
-        let n_rows: usize = sections.iter().map(|sec| sec.rows.len()).sum();
-        let n_headers = if sections.len() > 1 { sections.len() } else { 0 };
         let custom_h = if cfg.overlay_custom_text.is_empty() { 0.0 } else { 18.0 * s };
-        let height = 24.0
-            + 20.0 * s
-            + n_headers as f32 * 16.0 * s
-            + n_rows as f32 * row_h
-            + custom_h
-            + toasts.len() as f32 * 18.0 * s
-            + 8.0;
+        let reserved_bottom = custom_h + toasts.len() as f32 * 18.0 * s;
 
         let mut changed = false;
         let mut passthrough_toggled = false;
@@ -1587,8 +1578,19 @@ impl App {
                 .with_transparent(true)
                 .with_always_on_top()
                 .with_taskbar(false)
-                .with_inner_size([cfg.overlay_width, height.max(50.0)]),
+                .with_resizable(true)
+                .with_min_inner_size([180.0, 60.0])
+                .with_inner_size([cfg.overlay_width, cfg.overlay_height]),
             |ctx, _class| {
+                // Suit la taille réelle de la fenêtre (resize utilisateur via le grip).
+                let actual = ctx.input(|i| i.screen_rect().size());
+                if (actual.x - cfg.overlay_width).abs() > 1.0
+                    || (actual.y - cfg.overlay_height).abs() > 1.0
+                {
+                    cfg.overlay_width = actual.x;
+                    cfg.overlay_height = actual.y;
+                    changed = true;
+                }
                 if need_passthrough_cmd {
                     ctx.send_viewport_cmd_to(
                         overlay_id,
@@ -1650,10 +1652,15 @@ impl App {
                             );
                             ui.separator();
 
-                            // Sections de barres.
+                            // Sections de barres — auto-fit : on s'arrête quand
+                            // la hauteur restante est épuisée.
                             let show_headers = sections.len() > 1;
-                            for sec in &sections {
+                            'sections: for sec in &sections {
                                 if show_headers {
+                                    if ui.available_height() < 16.0 * s + row_h + reserved_bottom
+                                    {
+                                        break 'sections;
+                                    }
                                     ui.label(
                                         RichText::new(sec.label)
                                             .size(10.0 * s)
@@ -1665,6 +1672,9 @@ impl App {
                                 for (i, (name, per_sec, total, is_self)) in
                                     sec.rows.iter().enumerate()
                                 {
+                                    if ui.available_height() < row_h + reserved_bottom {
+                                        continue 'sections;
+                                    }
                                     bar_row(
                                         ui,
                                         name,
@@ -1697,6 +1707,44 @@ impl App {
                                 );
                             }
                         });
+
+                        // Grip de redimensionnement (coin bas-droit), comme une fenêtre.
+                        let screen = ctx.screen_rect();
+                        let grip = 16.0;
+                        let grip_rect = egui::Rect::from_min_max(
+                            screen.max - egui::vec2(grip, grip),
+                            screen.max,
+                        );
+                        let grip_resp = ui.interact(
+                            grip_rect,
+                            ui.id().with("resize_grip"),
+                            egui::Sense::drag(),
+                        );
+                        if grip_resp.drag_started() {
+                            ctx.send_viewport_cmd_to(
+                                overlay_id,
+                                egui::ViewportCommand::BeginResize(
+                                    egui::viewport::ResizeDirection::SouthEast,
+                                ),
+                            );
+                        }
+                        if grip_resp.hovered() {
+                            ctx.set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
+                        }
+                        // Trois traits diagonaux, plus visibles au survol.
+                        let alpha = if grip_resp.hovered() { 200 } else { 90 };
+                        let gc = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+                        let p = ui.painter();
+                        for k in 1..=3 {
+                            let off = k as f32 * 4.0;
+                            p.line_segment(
+                                [
+                                    egui::pos2(screen.max.x - off, screen.max.y - 2.0),
+                                    egui::pos2(screen.max.x - 2.0, screen.max.y - off),
+                                ],
+                                egui::Stroke::new(1.5, gc),
+                            );
+                        }
                     });
             },
         );
@@ -1728,14 +1776,16 @@ fn overlay_quick_menu(
             .add(egui::Slider::new(&mut cfg.overlay_opacity, 0.1..=1.0).text("Transparence"))
             .changed();
         *changed |= ui
-            .add(egui::Slider::new(&mut cfg.overlay_scale, 0.6..=2.0).text("Taille"))
-            .changed();
-        *changed |= ui
-            .add(egui::Slider::new(&mut cfg.overlay_width, 240.0..=640.0).text("Largeur"))
+            .add(egui::Slider::new(&mut cfg.overlay_scale, 0.6..=2.0).text("Taille du texte"))
             .changed();
         *changed |= ui
             .add(egui::Slider::new(&mut cfg.overlay_rows, 3..=15).text("Barres max"))
             .changed();
+        ui.label(
+            RichText::new("↘ Redimensionne la fenêtre par le grip en bas à droite.")
+                .weak()
+                .small(),
+        );
 
         ui.horizontal(|ui| {
             ui.label("Fond :");
