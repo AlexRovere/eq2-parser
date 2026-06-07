@@ -1106,6 +1106,33 @@ mod tests {
     }
 
     #[test]
+    fn friendly_npc_filtered_by_name_shape() {
+        let parser = Parser::new("Galym");
+        let mut engine = CombatEngine::new(6);
+        engine.self_name = "Galym".into();
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                "(1000)[Tue May 26 17:42:26 2026] YOU hit a rat for 100 crushing damage.",
+                // PNJ amical multi-mots qui soigne un allié → classé allié par propagation
+                "(1001)[Tue May 26 17:42:27 2026] Dakshesh, the Displaced's Mend heals Galym for 500 hit points.",
+            ],
+        );
+        let enc = engine.current.as_ref().unwrap();
+        let mut allies = compute_allies(enc, "Galym", &engine.known_players, &HashMap::new());
+        assert!(allies.contains("Dakshesh, the Displaced"));
+        // Filtre PNJ : les joueurs EQ2 ont un nom en un seul mot.
+        allies.retain(|n| !n.contains(' '));
+        assert!(allies.contains("Galym"));
+        assert!(!allies.contains("Dakshesh, the Displaced"));
+
+        let mut display = enc.clone();
+        display.allies = Some(allies);
+        assert!(display.heal_ranking().is_empty()); // le PNJ soigneur a disparu
+    }
+
+    #[test]
     fn death_report_records_recent_hits() {
         let parser = Parser::new("Tank");
         let mut engine = CombatEngine::new(10);

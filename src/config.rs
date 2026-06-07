@@ -48,6 +48,8 @@ pub struct Config {
     pub merge_pets: bool,
     /// Afficher aussi les ennemis (mobs) dans les classements.
     pub show_enemies: bool,
+    /// Masquer les PNJ alliés (mercenaires, PNJ de quête — noms à plusieurs mots).
+    pub hide_npcs: bool,
     /// Sauvegarder l'historique des encounters sur disque.
     pub persist_history: bool,
     /// Nombre max d'encounters conservés par personnage.
@@ -82,6 +84,7 @@ impl Default for Config {
             overlay_profiles: Vec::new(),
             merge_pets: true,
             show_enemies: false,
+            hide_npcs: true,
             persist_history: true,
             history_cap: 500,
             pet_assignments: HashMap::new(),

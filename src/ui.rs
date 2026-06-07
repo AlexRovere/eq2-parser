@@ -310,12 +310,18 @@ impl App {
         };
         if !self.config.show_enemies {
             // Calculé sur l'encounter brut (les arêtes y référencent les pets).
-            out.allies = Some(crate::combat::compute_allies(
+            let mut allies = crate::combat::compute_allies(
                 enc,
                 &self.engine.self_name,
                 &self.engine.known_players,
                 &owners,
-            ));
+            );
+            // Les noms de joueurs EQ2 sont en un seul mot : un allié multi-mots
+            // est un PNJ (mercenaire, PNJ de quête) — masqué si demandé.
+            if self.config.hide_npcs {
+                allies.retain(|n| !n.contains(' '));
+            }
+            out.allies = Some(allies);
         }
         out
     }
@@ -1020,6 +1026,19 @@ impl App {
             .on_hover_text(
                 "Par défaut, seuls les alliés apparaissent (inférence : qui attaque qui, \
                  qui soigne qui).",
+            )
+            .changed()
+        {
+            self.config.save();
+        }
+        if ui
+            .checkbox(
+                &mut self.config.hide_npcs,
+                "Masquer les PNJ alliés (mercenaires, PNJ de quête)",
+            )
+            .on_hover_text(
+                "Les noms de joueurs EQ2 sont en un seul mot : tout allié au nom \
+                 à plusieurs mots est un PNJ. Décoche si tu veux voir les mercenaires.",
             )
             .changed()
         {
