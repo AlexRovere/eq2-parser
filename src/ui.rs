@@ -128,6 +128,10 @@ pub struct App {
     session_selected: bool,
     /// Cache de l'agrégat de session : (longueur d'historique, agrégat).
     session_cache: Option<(usize, Encounter)>,
+    /// Zone sélectionnée (agrégat par zone).
+    selected_zone: Option<String>,
+    /// Cache de l'agrégat de zone : (longueur d'historique, zone, agrégat).
+    zone_cache: Option<(usize, String, Encounter)>,
     /// Nom saisi pour enregistrer un profil d'overlay.
     profile_name: String,
 }
@@ -165,6 +169,8 @@ impl App {
             filter_log: String::new(),
             session_selected: false,
             session_cache: None,
+            selected_zone: None,
+            zone_cache: None,
             profile_name: String::new(),
         };
         // Réattache automatiquement le dernier log suivi.
@@ -276,6 +282,22 @@ impl App {
                 Some((len, crate::combat::aggregate_session(&self.engine.history)));
         }
         self.session_cache.as_ref().unwrap().1.clone()
+    }
+
+    /// Agrégat d'une zone (stats par zone), mis en cache.
+    fn zone_aggregate(&mut self, zone: &str) -> Encounter {
+        let len = self.engine.history.len();
+        if self
+            .zone_cache
+            .as_ref()
+            .is_none_or(|(cached_len, z, _)| *cached_len != len || z != zone)
+        {
+            let agg = crate::combat::aggregate_session(
+                self.engine.history.iter().filter(|e| e.zone == zone),
+            );
+            self.zone_cache = Some((len, zone.to_string(), agg));
+        }
+        self.zone_cache.as_ref().unwrap().2.clone()
     }
 
     /// Encounter prêt pour l'affichage : pets fusionnés + filtre alliés/ennemis.
@@ -579,27 +601,37 @@ impl App {
                             .clicked()
                         {
                             self.session_selected = true;
+                            self.selected_zone = None;
                             self.selected_encounter = None;
                             self.selected_combatant = None;
                         }
                         ui.separator();
                     }
                     if self.engine.current.is_some() {
-                        let sel = self.selected_encounter.is_none() && !self.session_selected;
+                        let sel = self.selected_encounter.is_none()
+                            && !self.session_selected
+                            && self.selected_zone.is_none();
                         if ui.selectable_label(sel, "▶ Combat en cours").clicked() {
                             self.selected_encounter = None;
                             self.session_selected = false;
+                            self.selected_zone = None;
                             self.selected_combatant = None;
                         }
                     }
+                    // Nombre de combats par zone (pour les en-têtes).
+                    let mut zone_counts: HashMap<&str, usize> = HashMap::new();
+                    for enc in &self.engine.history {
+                        *zone_counts.entry(enc.zone.as_str()).or_default() += 1;
+                    }
                     let mut shown = 0;
                     let mut selected: Option<usize> = None;
+                    let mut zone_clicked: Option<String> = None;
                     let mut last_zone: Option<&str> = None;
                     for (i, enc) in self.engine.history.iter().enumerate().rev() {
                         if !matches_filter(&enc.title(), &filter) {
                             continue;
                         }
-                        // En-tête de zone quand elle change dans la liste.
+                        // En-tête de zone cliquable → stats agrégées de la zone.
                         if last_zone != Some(enc.zone.as_str()) {
                             last_zone = Some(enc.zone.as_str());
                             let zone = if enc.zone.is_empty() {
@@ -607,12 +639,21 @@ impl App {
                             } else {
                                 enc.zone.as_str()
                             };
+                            let count = zone_counts.get(enc.zone.as_str()).copied().unwrap_or(0);
                             ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!("🗺 {zone}"))
-                                    .small()
-                                    .color(Color32::from_rgb(93, 173, 226)),
-                            );
+                            let sel = self.selected_zone.as_deref() == Some(enc.zone.as_str());
+                            if ui
+                                .selectable_label(
+                                    sel,
+                                    RichText::new(format!("🗺 {zone} ({count})"))
+                                        .small()
+                                        .color(Color32::from_rgb(93, 173, 226)),
+                                )
+                                .on_hover_text("Clic : stats agrégées de la zone")
+                                .clicked()
+                            {
+                                zone_clicked = Some(enc.zone.clone());
+                            }
                         }
                         shown += 1;
                         let label = format!(
@@ -621,15 +662,23 @@ impl App {
                             fmt_num(enc.total_damage()),
                             fmt_duration(enc.duration())
                         );
-                        let sel =
-                            self.selected_encounter == Some(i) && !self.session_selected;
+                        let sel = self.selected_encounter == Some(i)
+                            && !self.session_selected
+                            && self.selected_zone.is_none();
                         if ui.selectable_label(sel, label).clicked() {
                             selected = Some(i);
                         }
                     }
+                    if let Some(z) = zone_clicked {
+                        self.selected_zone = Some(z);
+                        self.session_selected = false;
+                        self.selected_encounter = None;
+                        self.selected_combatant = None;
+                    }
                     if let Some(i) = selected {
                         self.selected_encounter = Some(i);
                         self.session_selected = false;
+                        self.selected_zone = None;
                         self.selected_combatant = None;
                     }
                     if shown == 0 && self.engine.current.is_none() {
@@ -640,6 +689,8 @@ impl App {
 
         let raw = if self.session_selected {
             Some(self.session_aggregate())
+        } else if let Some(zone) = self.selected_zone.clone() {
+            Some(self.zone_aggregate(&zone))
         } else {
             match self.selected_encounter {
                 Some(i) => self.engine.history.get(i).cloned(),
@@ -659,6 +710,15 @@ impl App {
                     "Σ Session entière ({} combats)",
                     self.engine.history.len()
                 ));
+            } else if let Some(zone) = &self.selected_zone {
+                let count = self
+                    .engine
+                    .history
+                    .iter()
+                    .filter(|e| &e.zone == zone)
+                    .count();
+                let zone_label = if zone.is_empty() { "(zone inconnue)" } else { zone.as_str() };
+                ui.heading(format!("🗺 {zone_label} ({count} combats)"));
             } else {
                 ui.heading(enc.title());
                 if !enc.zone.is_empty() {
@@ -2129,6 +2189,19 @@ impl App {
                 "⚔ Attaques évitées par l'adversaire : {detail}  (précision {acc:.1} %)"
             ))
             .weak(),
+        );
+    }
+    if !c.resists_by_school.is_empty() {
+        let total: u32 = c.resists_by_school.values().sum();
+        let detail = c
+            .resists_by_school
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        ui.label(
+            RichText::new(format!("🔮 Sorts résistés par école : {detail}  (total {total})"))
+                .color(Color32::from_rgb(155, 89, 182)),
         );
     }
 

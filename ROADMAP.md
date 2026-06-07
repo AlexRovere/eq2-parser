@@ -42,7 +42,8 @@ Mis à jour : 2026-06-07.
       séries temporelles remappées, cache invalidé à chaque nouveau combat)
 - [x] Parser `You have entered <Zone>.` → en-têtes de zone dans l'historique,
       zone affichée dans le détail, zoner clôt le combat en cours
-- [ ] Stats par zone (durée totale, DPS moyen, morts)
+- [x] Stats par zone : clic sur l'en-tête de zone → agrégat de tous les combats
+      de la zone (durée cumulée, classements, graphes, morts)
 
 ## 🟡 À faire — priorité moyenne
 
@@ -55,7 +56,9 @@ Mis à jour : 2026-06-07.
 ### Breakdown avoidance / défense
 - [x] Détail parade / riposte / esquive / bloc par combattant (évitements +
       attaques ratées avec % de précision) — gère aussi les formes `YOU parry`
-- [ ] Resists par école de magie
+- [x] Resists par école de magie (`X tries to burn Y with Z, but Y resists.`,
+      verbe → école : burn=heat, freeze=cold… ; la forme `YOU try to` n'était
+      pas parsée du tout avant)
 
 ### Confort UI
 - [x] Tables triables par clic sur l'en-tête de colonne (dégâts, soins, power,

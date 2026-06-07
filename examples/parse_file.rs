@@ -50,6 +50,7 @@ fn main() {
                     LogEvent::EnvDamage { .. } => "env_damage",
                     LogEvent::FailedHit { .. } => "failed_hit",
                     LogEvent::Miss { .. } => "miss",
+                    LogEvent::Resist { .. } => "resist",
                     LogEvent::Heal { .. } => "heal",
                     LogEvent::PowerRefresh { .. } => "power",
                     LogEvent::WardApplied { .. } => "ward",

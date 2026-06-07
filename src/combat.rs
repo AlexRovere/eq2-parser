@@ -67,6 +67,8 @@ pub struct Combatant {
     pub misses_by_kind: BTreeMap<String, u32>,
     /// Attaques adverses que J'AI évitées, par type.
     pub avoids_by_kind: BTreeMap<String, u32>,
+    /// Mes sorts résistés, par école de magie (heat, cold, disease…).
+    pub resists_by_school: BTreeMap<String, u32>,
 }
 
 impl Combatant {
@@ -128,6 +130,9 @@ impl Combatant {
         for (k, v) in &other.avoids_by_kind {
             *self.avoids_by_kind.entry(k.clone()).or_default() += v;
         }
+        for (k, v) in &other.resists_by_school {
+            *self.resists_by_school.entry(k.clone()).or_default() += v;
+        }
     }
 
     /// Fusionne `other` tel quel (agrégat de session), avec remapping temporel
@@ -186,6 +191,9 @@ impl Combatant {
         }
         for (k, v) in &other.avoids_by_kind {
             *self.avoids_by_kind.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.resists_by_school {
+            *self.resists_by_school.entry(k.clone()).or_default() += v;
         }
     }
 }
@@ -651,6 +659,27 @@ impl CombatEngine {
                     }
                 }
             }
+            LogEvent::Resist { attacker, target, ability, school } => {
+                // Compte comme une attaque ratée (type « résisté ») + école.
+                if let Some(enc) = self.current.as_mut() {
+                    if epoch <= enc.end + self.timeout {
+                        enc.end = epoch;
+                        enc.attacks
+                            .entry(attacker.clone())
+                            .or_default()
+                            .insert(target.clone());
+                        let a = enc.combatants.entry(attacker.clone()).or_default();
+                        a.misses += 1;
+                        *a.misses_by_kind.entry("résisté".into()).or_default() += 1;
+                        *a.resists_by_school.entry(school.clone()).or_default() += 1;
+                        // Le sort résisté apparaît dans le breakdown avec 0 dégât.
+                        let ab = a.abilities.entry(ability.clone()).or_default();
+                        ab.hits += 1;
+                        let t = enc.combatants.entry(target.clone()).or_default();
+                        *t.avoids_by_kind.entry("résisté".into()).or_default() += 1;
+                    }
+                }
+            }
             LogEvent::Heal { healer, ability, target, amount, crit } => {
                 if let Some(enc) = self.current.as_mut() {
                     if epoch <= enc.end + self.timeout {
@@ -828,7 +857,7 @@ impl CombatEngine {
 /// Agrège plusieurs encounters en un pseudo-encounter « session » :
 /// les combats sont concaténés bout à bout (durée = somme des durées,
 /// séries temporelles remappées pour les graphes).
-pub fn aggregate_session(encs: &[Encounter]) -> Encounter {
+pub fn aggregate_session<'a>(encs: impl IntoIterator<Item = &'a Encounter>) -> Encounter {
     let mut agg = Encounter::new(0);
     agg.finished = true;
     agg.zone = "Session".into();

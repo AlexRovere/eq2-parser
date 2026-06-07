@@ -50,6 +50,14 @@ pub enum LogEvent {
         target: String,
         kind: MissKind,
     },
+    /// `X tries to burn Y with Fireball, but Y resists.` — sort résisté,
+    /// l'école est déduite du verbe (burn = heat, freeze = cold…).
+    Resist {
+        attacker: String,
+        target: String,
+        ability: String,
+        school: String,
+    },
     Heal {
         healer: String,
         ability: String,
@@ -114,6 +122,7 @@ struct Patterns {
     env_hit: Regex,
     failed_hit: Regex,
     miss: Regex,
+    resist: Regex,
     heal_your: Regex,
     heal_other: Regex,
     power_your: Regex,
@@ -188,6 +197,11 @@ fn patterns() -> &'static Patterns {
                 r"^(.+?) (?:hits|hit) (.+?) but fails? to inflict any damage\.$",
             )
             .unwrap(),
+            // <attacker> tr(y|ies) to <école> <target> with <sort>, but <target> resists.
+            resist: Regex::new(
+                r"^(.+?) tr(?:y|ies) to (\w+) (.+?) with (.+?), but .+? resists\.$",
+            )
+            .unwrap(),
             // <attacker> tries to <verb> <target>, but [misses | <target> parries...].
             miss: Regex::new(
                 r"^(.+?) tries to \w+ (.+?), but (?:(misses)|.+? (parries|parry|ripostes|riposte|dodges|dodge|blocks|block|deflects|deflect)|(.+? resists))[.!]?$",
@@ -232,6 +246,22 @@ fn patterns() -> &'static Patterns {
             slain: Regex::new(r"^(.+?) (?:has|have) been slain by (.+?)!$").unwrap(),
         }
     })
+}
+
+/// Mappe le verbe d'attaque magique vers l'école de dégâts.
+fn school_of(verb: &str) -> &str {
+    match verb {
+        "burn" => "heat",
+        "freeze" => "cold",
+        "smite" => "divine",
+        "blast" | "shock" => "magic",
+        "confound" | "daze" => "mental",
+        "pierce" => "piercing",
+        "slash" => "slashing",
+        "crush" => "crushing",
+        // disease, poison, drain… : le verbe est déjà l'école.
+        v => v,
+    }
 }
 
 fn parse_num(s: &str) -> u64 {
@@ -411,6 +441,17 @@ impl Parser {
                 return Some(LogEvent::FailedHit {
                     attacker: self.resolve(&c[1]),
                     target: self.resolve(&c[2]),
+                });
+            }
+        }
+
+        if msg.contains(" resists.") {
+            if let Some(c) = p.resist.captures(msg) {
+                return Some(LogEvent::Resist {
+                    attacker: self.resolve(&c[1]),
+                    school: school_of(&c[2]).to_string(),
+                    target: self.resolve(&c[3]),
+                    ability: c[4].to_string(),
                 });
             }
         }
@@ -931,6 +972,37 @@ mod tests {
                 source: "Pawkod".into(),
                 target: "a Sablevein crumbler".into(),
                 amount: 101,
+            }
+        );
+    }
+
+    #[test]
+    fn resists_with_school() {
+        // Forme YOU ("try") — n'était pas parsée avant.
+        let e = p()
+            .parse_message("YOU try to disease a klicnik mite with Caress Feedback, but a klicnik mite resists.")
+            .unwrap();
+        assert_eq!(
+            e,
+            LogEvent::Resist {
+                attacker: "Pawkod".into(),
+                school: "disease".into(),
+                target: "a klicnik mite".into(),
+                ability: "Caress Feedback".into(),
+            }
+        );
+
+        // Forme 3e personne + mapping verbe → école (burn = heat).
+        let e = p()
+            .parse_message("Saroulman tries to burn a klicnik mite with Fire Chamber, but a klicnik mite resists.")
+            .unwrap();
+        assert_eq!(
+            e,
+            LogEvent::Resist {
+                attacker: "Saroulman".into(),
+                school: "heat".into(),
+                target: "a klicnik mite".into(),
+                ability: "Fire Chamber".into(),
             }
         );
     }
