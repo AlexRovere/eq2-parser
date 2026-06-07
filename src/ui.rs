@@ -679,23 +679,73 @@ impl App {
 
         ui.separator();
         ui.heading("Overlay");
+        ui.label(
+            RichText::new("💡 Clic droit sur l'overlay lui-même pour ces réglages en jeu.")
+                .weak()
+                .small(),
+        );
         let mut changed = false;
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut self.config.overlay_opacity, 0.2..=1.0)
-                    .text("Opacité"),
-            )
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut self.config.overlay_rows, 3..=15).text("Barres max"))
-            .changed();
-        changed |= ui
-            .checkbox(&mut self.config.overlay_show_heals, "Afficher HPS au lieu de DPS")
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.config.overlay_opacity, 0.1..=1.0)
+                        .text("Transparence"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.config.overlay_scale, 0.6..=2.0)
+                        .text("Taille"),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.config.overlay_width, 240.0..=640.0)
+                        .text("Largeur"),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.config.overlay_rows, 3..=15)
+                        .text("Barres max"),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Couleur de fond :");
+            changed |= ui.color_edit_button_srgb(&mut self.config.overlay_bg).changed();
+            ui.label("Accent (toi, texte custom) :");
+            changed |= ui
+                .color_edit_button_srgb(&mut self.config.overlay_accent)
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut self.config.overlay_title_stats, "Titre détaillé")
+                .on_hover_text("Durée + total dégâts + DPS raid + kills dans la barre de titre")
+                .changed();
+            changed |= ui.checkbox(&mut self.config.overlay_show_dps, "DPS").changed();
+            changed |= ui.checkbox(&mut self.config.overlay_show_hps, "HPS").changed();
+            changed |= ui
+                .checkbox(&mut self.config.overlay_show_power, "Power")
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Texte custom :");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.config.overlay_custom_text)
+                        .hint_text("affiché en bas de l'overlay…")
+                        .desired_width(280.0),
+                )
+                .changed();
+        });
         if ui
             .checkbox(
                 &mut self.config.overlay_click_through,
-                "Click-through (l'overlay laisse passer les clics — déplaçable uniquement quand désactivé)",
+                "Click-through (l'overlay laisse passer les clics — réglages uniquement ici quand actif)",
             )
             .changed()
         {
@@ -1414,11 +1464,16 @@ fn ability_breakdown(ui: &mut egui::Ui, enc: &Encounter, name: &str) {
 // Overlay
 // ---------------------------------------------------------------------------
 
+/// Une section de barres de l'overlay (DPS, HPS ou Power), pré-calculée.
+struct OverlaySection {
+    label: &'static str,
+    /// (nom, valeur/s, total, est_soi)
+    rows: Vec<(String, f64, u64, bool)>,
+}
+
 impl App {
     fn show_overlay(&mut self, ctx: &egui::Context) {
         let overlay_id = egui::ViewportId::from_hash_of("eq2_overlay");
-        let rows = self.config.overlay_rows;
-        let height = 46.0 + rows as f32 * 22.0 + 26.0;
 
         let enc = self
             .engine
@@ -1426,8 +1481,6 @@ impl App {
             .cloned()
             .map(|e| self.for_display(&e));
         let live = self.engine.current.is_some();
-        let opacity = self.config.overlay_opacity;
-        let show_heals = self.config.overlay_show_heals;
         let self_name = self.self_name().map(|s| s.to_string());
         let toasts: Vec<String> = self
             .trigger_engine
@@ -1435,8 +1488,96 @@ impl App {
             .iter()
             .map(|t| t.text.clone())
             .collect();
-        let click_through = self.config.overlay_click_through;
         let need_passthrough_cmd = !self.passthrough_sent;
+
+        let cfg = &mut self.config;
+        let s = cfg.overlay_scale.clamp(0.6, 2.5);
+        let rows_max = cfg.overlay_rows;
+
+        // Pré-calcul des sections affichées.
+        let mut sections: Vec<OverlaySection> = Vec::new();
+        if let Some(e) = &enc {
+            let mk = |ranking: Vec<(&String, &crate::combat::Combatant)>,
+                      per_sec: &dyn Fn(&crate::combat::Combatant) -> f64,
+                      total: &dyn Fn(&crate::combat::Combatant) -> u64|
+             -> Vec<(String, f64, u64, bool)> {
+                ranking
+                    .into_iter()
+                    .take(rows_max)
+                    .map(|(n, c)| {
+                        (
+                            n.clone(),
+                            per_sec(c),
+                            total(c),
+                            self_name.as_deref() == Some(n.as_str()),
+                        )
+                    })
+                    .collect()
+            };
+            if cfg.overlay_show_dps {
+                sections.push(OverlaySection {
+                    label: "DPS",
+                    rows: mk(e.damage_ranking(), &|c| e.dps_of(c), &|c| c.damage),
+                });
+            }
+            if cfg.overlay_show_hps {
+                sections.push(OverlaySection {
+                    label: "HPS",
+                    rows: mk(e.heal_ranking(), &|c| e.hps_of(c), &|c| c.healing),
+                });
+            }
+            if cfg.overlay_show_power {
+                sections.push(OverlaySection {
+                    label: "Power",
+                    rows: mk(e.power_ranking(), &|c| e.pps_of(c), &|c| c.power),
+                });
+            }
+            sections.retain(|sec| !sec.rows.is_empty());
+        }
+
+        // Barre de titre.
+        let title = match &enc {
+            Some(e) => {
+                let base = format!(
+                    "{} — {}{}",
+                    e.title(),
+                    fmt_duration(e.duration()),
+                    if live { "" } else { " (fini)" }
+                );
+                if cfg.overlay_title_stats {
+                    let raid_dps = e.total_damage() as f64 / e.duration() as f64;
+                    let kills = if e.kills.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  •  {} kill{}", e.kills.len(), if e.kills.len() > 1 { "s" } else { "" })
+                    };
+                    format!(
+                        "{base}  •  {} dmg  •  {} raid{kills}",
+                        fmt_num(e.total_damage()),
+                        fmt_f64(raid_dps)
+                    )
+                } else {
+                    base
+                }
+            }
+            None => "EQ2 Tools — en attente".to_string(),
+        };
+
+        // Hauteur dynamique selon le contenu.
+        let row_h = 20.0 * s;
+        let n_rows: usize = sections.iter().map(|sec| sec.rows.len()).sum();
+        let n_headers = if sections.len() > 1 { sections.len() } else { 0 };
+        let custom_h = if cfg.overlay_custom_text.is_empty() { 0.0 } else { 18.0 * s };
+        let height = 24.0
+            + 20.0 * s
+            + n_headers as f32 * 16.0 * s
+            + n_rows as f32 * row_h
+            + custom_h
+            + toasts.len() as f32 * 18.0 * s
+            + 8.0;
+
+        let mut changed = false;
+        let mut passthrough_toggled = false;
 
         ctx.show_viewport_immediate(
             overlay_id,
@@ -1446,21 +1587,27 @@ impl App {
                 .with_transparent(true)
                 .with_always_on_top()
                 .with_taskbar(false)
-                .with_inner_size([340.0, height]),
-            move |ctx, _class| {
+                .with_inner_size([cfg.overlay_width, height.max(50.0)]),
+            |ctx, _class| {
                 if need_passthrough_cmd {
                     ctx.send_viewport_cmd_to(
                         overlay_id,
-                        egui::ViewportCommand::MousePassthrough(click_through),
+                        egui::ViewportCommand::MousePassthrough(cfg.overlay_click_through),
                     );
                 }
 
                 let bg = Color32::from_rgba_unmultiplied(
-                    12,
-                    12,
-                    18,
-                    (opacity * 235.0) as u8,
+                    cfg.overlay_bg[0],
+                    cfg.overlay_bg[1],
+                    cfg.overlay_bg[2],
+                    (cfg.overlay_opacity * 235.0) as u8,
                 );
+                let accent = Color32::from_rgb(
+                    cfg.overlay_accent[0],
+                    cfg.overlay_accent[1],
+                    cfg.overlay_accent[2],
+                );
+
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ctx, |ui| {
@@ -1471,88 +1618,81 @@ impl App {
                         frame.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
 
-                            // Barre de titre (zone de drag)
-                            let title = match &enc {
-                                Some(e) => format!(
-                                    "{} — {}{}",
-                                    e.title(),
-                                    fmt_duration(e.duration()),
-                                    if live { "" } else { " (fini)" }
-                                ),
-                                None => "EQ2 Tools — en attente".to_string(),
-                            };
+                            // Barre de titre : drag + clic droit = réglages rapides.
                             let resp = ui
                                 .horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(if show_heals { "HPS" } else { "DPS" })
-                                            .small()
-                                            .strong()
-                                            .color(Color32::from_rgb(241, 196, 15)),
-                                    );
-                                    ui.label(
-                                        RichText::new(title).small().color(Color32::WHITE),
+                                        RichText::new(title.as_str())
+                                            .size(11.0 * s)
+                                            .color(Color32::WHITE),
                                     );
                                 })
                                 .response;
-                            let drag = ui.interact(
-                                resp.rect.expand(4.0),
+                            let interact = ui.interact(
+                                resp.rect.expand2(egui::vec2(
+                                    ui.available_width().max(0.0),
+                                    4.0,
+                                )),
                                 ui.id().with("drag"),
-                                egui::Sense::drag(),
+                                egui::Sense::click_and_drag(),
                             );
-                            if drag.dragged() {
+                            if interact.dragged() {
                                 ctx.send_viewport_cmd_to(
                                     overlay_id,
                                     egui::ViewportCommand::StartDrag,
                                 );
                             }
+                            overlay_quick_menu(
+                                &interact,
+                                cfg,
+                                &mut changed,
+                                &mut passthrough_toggled,
+                            );
                             ui.separator();
 
-                            // Barres
-                            if let Some(e) = &enc {
-                                let ranking = if show_heals {
-                                    e.heal_ranking()
-                                } else {
-                                    e.damage_ranking()
-                                };
-                                let top = ranking
-                                    .first()
-                                    .map(|(_, c)| {
-                                        if show_heals { c.healing } else { c.damage }
-                                    })
-                                    .unwrap_or(1)
-                                    .max(1);
-                                for (i, (name, c)) in
-                                    ranking.iter().take(rows).enumerate()
+                            // Sections de barres.
+                            let show_headers = sections.len() > 1;
+                            for sec in &sections {
+                                if show_headers {
+                                    ui.label(
+                                        RichText::new(sec.label)
+                                            .size(10.0 * s)
+                                            .strong()
+                                            .color(accent),
+                                    );
+                                }
+                                let top = sec.rows.first().map(|r| r.2).unwrap_or(1).max(1);
+                                for (i, (name, per_sec, total, is_self)) in
+                                    sec.rows.iter().enumerate()
                                 {
-                                    let (val, per_sec) = if show_heals {
-                                        (c.healing, e.hps_of(c))
-                                    } else {
-                                        (c.damage, e.dps_of(c))
-                                    };
-                                    let frac = val as f64 / top as f64;
-                                    let color = BAR_COLORS[i % BAR_COLORS.len()];
-                                    let is_self =
-                                        self_name.as_deref() == Some(name.as_str());
                                     bar_row(
                                         ui,
                                         name,
-                                        &format!(
-                                            "{}  ({})",
-                                            fmt_f64(per_sec),
-                                            fmt_num(val)
-                                        ),
-                                        frac as f32,
-                                        color,
-                                        is_self,
+                                        &format!("{}  ({})", fmt_f64(*per_sec), fmt_num(*total)),
+                                        (*total as f64 / top as f64) as f32,
+                                        BAR_COLORS[i % BAR_COLORS.len()],
+                                        if *is_self { accent } else { Color32::WHITE },
+                                        s,
                                     );
                                 }
                             }
 
-                            // Toasts triggers
+                            // Texte custom.
+                            if !cfg.overlay_custom_text.is_empty() {
+                                ui.label(
+                                    RichText::new(cfg.overlay_custom_text.as_str())
+                                        .size(11.0 * s)
+                                        .italics()
+                                        .color(accent),
+                                );
+                            }
+
+                            // Toasts triggers.
                             for t in &toasts {
                                 ui.label(
                                     RichText::new(format!("🔔 {t}"))
-                                        .color(Color32::from_rgb(241, 196, 15))
+                                        .size(12.0 * s)
+                                        .color(accent)
                                         .strong(),
                                 );
                             }
@@ -1560,19 +1700,102 @@ impl App {
                     });
             },
         );
-        self.passthrough_sent = true;
+
+        if passthrough_toggled {
+            self.passthrough_sent = false;
+        } else {
+            self.passthrough_sent = true;
+        }
+        if changed {
+            self.config.save();
+        }
     }
 }
 
+/// Menu clic droit de l'overlay : tous les réglages en accès rapide.
+fn overlay_quick_menu(
+    resp: &egui::Response,
+    cfg: &mut Config,
+    changed: &mut bool,
+    passthrough_toggled: &mut bool,
+) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(260.0);
+        ui.label(RichText::new("Réglages overlay").strong());
+        ui.separator();
+
+        *changed |= ui
+            .add(egui::Slider::new(&mut cfg.overlay_opacity, 0.1..=1.0).text("Transparence"))
+            .changed();
+        *changed |= ui
+            .add(egui::Slider::new(&mut cfg.overlay_scale, 0.6..=2.0).text("Taille"))
+            .changed();
+        *changed |= ui
+            .add(egui::Slider::new(&mut cfg.overlay_width, 240.0..=640.0).text("Largeur"))
+            .changed();
+        *changed |= ui
+            .add(egui::Slider::new(&mut cfg.overlay_rows, 3..=15).text("Barres max"))
+            .changed();
+
+        ui.horizontal(|ui| {
+            ui.label("Fond :");
+            *changed |= ui.color_edit_button_srgb(&mut cfg.overlay_bg).changed();
+            ui.label("Accent :");
+            *changed |= ui.color_edit_button_srgb(&mut cfg.overlay_accent).changed();
+        });
+        ui.separator();
+
+        ui.label(RichText::new("Contenu").strong());
+        *changed |= ui
+            .checkbox(&mut cfg.overlay_title_stats, "Titre détaillé (total, DPS raid, kills)")
+            .changed();
+        *changed |= ui.checkbox(&mut cfg.overlay_show_dps, "Barres DPS").changed();
+        *changed |= ui.checkbox(&mut cfg.overlay_show_hps, "Barres HPS").changed();
+        *changed |= ui
+            .checkbox(&mut cfg.overlay_show_power, "Barres Power")
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label("Texte :");
+            *changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut cfg.overlay_custom_text)
+                        .hint_text("texte libre affiché en bas…")
+                        .desired_width(170.0),
+                )
+                .changed();
+        });
+        ui.separator();
+
+        if ui
+            .checkbox(&mut cfg.overlay_click_through, "Click-through")
+            .on_hover_text(
+                "L'overlay laisse passer les clics. À désactiver depuis Settings \
+                 (le clic droit ne marchera plus ici !)",
+            )
+            .changed()
+        {
+            *changed = true;
+            *passthrough_toggled = true;
+        }
+        if ui.button("✖ Masquer l'overlay").clicked() {
+            cfg.overlay_enabled = false;
+            *changed = true;
+            ui.close_menu();
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn bar_row(
     ui: &mut egui::Ui,
     name: &str,
     value: &str,
     frac: f32,
     color: Color32,
-    highlight: bool,
+    name_color: Color32,
+    scale: f32,
 ) {
-    let height = 18.0;
+    let height = 18.0 * scale;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
@@ -1587,23 +1810,18 @@ fn bar_row(
     );
     painter.rect_filled(fill, 3.0, color.gamma_multiply(0.55));
     // Texte
-    let name_color = if highlight {
-        Color32::from_rgb(241, 196, 15)
-    } else {
-        Color32::WHITE
-    };
     painter.text(
         rect.left_center() + egui::vec2(4.0, 0.0),
         egui::Align2::LEFT_CENTER,
         name,
-        egui::FontId::proportional(12.0),
+        egui::FontId::proportional(12.0 * scale),
         name_color,
     );
     painter.text(
         rect.right_center() - egui::vec2(4.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         value,
-        egui::FontId::proportional(12.0),
+        egui::FontId::proportional(12.0 * scale),
         Color32::WHITE,
     );
     ui.add_space(2.0);

@@ -5,9 +5,12 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
 
 ## Fonctionnalités
 
-- **Overlay temps réel** : barres DPS (ou HPS) par combattant, toujours au-dessus du jeu,
-  déplaçable (drag sur la barre de titre), opacité réglable, click-through optionnel.
-  Ton personnage est surligné en jaune.
+- **Overlay temps réel** : barres DPS / HPS / Power par combattant (sections au choix),
+  toujours au-dessus du jeu, déplaçable (drag sur la barre de titre).
+  **Clic droit sur l'overlay** pour tout régler en jeu : transparence, taille (échelle),
+  largeur, nombre de barres, couleurs (fond + accent), titre détaillé
+  (durée • total • DPS raid • kills), texte libre, click-through.
+  Ton personnage est surligné avec la couleur d'accent.
 - **Détection automatique des encounters** : démarre à la première action offensive,
   se clôt après N secondes d'inactivité (réglable, défaut 6 s).
 - **Historique de session** : liste des combats avec totaux, durée, kills.

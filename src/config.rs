@@ -19,10 +19,24 @@ pub struct Config {
     pub overlay_enabled: bool,
     pub overlay_opacity: f32,
     pub overlay_click_through: bool,
-    /// Nombre de barres max dans l'overlay.
+    /// Nombre de barres max par section dans l'overlay.
     pub overlay_rows: usize,
-    /// Mode overlay : dégâts ou soins.
-    pub overlay_show_heals: bool,
+    /// Échelle globale de l'overlay (police, barres). 1.0 = normal.
+    pub overlay_scale: f32,
+    /// Largeur de l'overlay en points.
+    pub overlay_width: f32,
+    /// Couleur de fond (RGB) — l'alpha vient de `overlay_opacity`.
+    pub overlay_bg: [u8; 3],
+    /// Couleur d'accent (ton personnage, texte custom).
+    pub overlay_accent: [u8; 3],
+    /// Sections affichées.
+    pub overlay_show_dps: bool,
+    pub overlay_show_hps: bool,
+    pub overlay_show_power: bool,
+    /// Barre de titre détaillée : durée + total + DPS raid + kills.
+    pub overlay_title_stats: bool,
+    /// Ligne de texte libre affichée en bas de l'overlay.
+    pub overlay_custom_text: String,
     pub triggers: Vec<Trigger>,
     /// Fusionner les pets dans leur propriétaire à l'affichage.
     pub merge_pets: bool,
@@ -41,7 +55,15 @@ impl Default for Config {
             overlay_opacity: 0.85,
             overlay_click_through: false,
             overlay_rows: 8,
-            overlay_show_heals: false,
+            overlay_scale: 1.0,
+            overlay_width: 340.0,
+            overlay_bg: [12, 12, 18],
+            overlay_accent: [241, 196, 15],
+            overlay_show_dps: true,
+            overlay_show_hps: false,
+            overlay_show_power: false,
+            overlay_title_stats: true,
+            overlay_custom_text: String::new(),
             triggers: Vec::new(),
             merge_pets: true,
             pet_assignments: HashMap::new(),
