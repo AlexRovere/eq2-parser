@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "eq2-tools"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "EverQuest II combat log parser with live DPS overlay (ACT-style)"
 
@@ -16,6 +16,9 @@ rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tts = "0.26"
 ureq = "2"
+
+[build-dependencies]
+winres = "0.1"
 
 [profile.release]
 lto = true

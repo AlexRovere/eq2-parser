@@ -150,6 +150,8 @@ pub struct App {
     last_hist_save: Instant,
     /// Dernier scan du répertoire de logs (suivi auto du perso actif).
     last_log_scan: Instant,
+    /// Fractions animées des barres de l'overlay : (section, nom) → valeur lissée.
+    bar_anim: HashMap<(&'static str, String), f32>,
     /// Tri par table : id → (colonne, descendant).
     sort_states: HashMap<&'static str, (usize, bool)>,
     /// Filtres texte.
@@ -218,6 +220,7 @@ impl App {
             last_hist_len: 0,
             last_hist_save: Instant::now(),
             last_log_scan: Instant::now(),
+            bar_anim: HashMap::new(),
             sort_states: HashMap::new(),
             filter_combatant: String::new(),
             filter_ability: String::new(),
@@ -641,6 +644,26 @@ impl eframe::App for App {
         self.drain_lines();
         self.engine.tick(Self::now_epoch());
         self.trigger_engine.tick();
+
+        // Raccourcis clavier : Ctrl+1..4 = onglets, Échap = fermer le breakdown.
+        ctx.input_mut(|i| {
+            use egui::{Key, Modifiers};
+            if i.consume_key(Modifiers::CTRL, Key::Num1) {
+                self.tab = Tab::Live;
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Num2) {
+                self.tab = Tab::Encounters;
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Num3) {
+                self.tab = Tab::Triggers;
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Num4) {
+                self.tab = Tab::Settings;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.selected_combatant = None;
+            }
+        });
 
         // Notifications de mise à jour.
         if let Ok(info) = self.update_rx.try_recv() {
@@ -1101,9 +1124,34 @@ impl App {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, t) in self.config.triggers.iter_mut().enumerate() {
-                ui.group(|ui| {
+                // En-tête compact : état + nom + badges + aperçu du pattern.
+                let mut badges = String::new();
+                if t.tts {
+                    badges.push_str("  🗣");
+                }
+                if t.timer_secs > 0 {
+                    badges.push_str(&format!("  ⏱{}s", t.timer_secs));
+                }
+                if t.cooldown_secs > 0 {
+                    badges.push_str(&format!("  🔁{}s", t.cooldown_secs));
+                }
+                if t.sound.is_some() {
+                    badges.push_str("  🎵");
+                }
+                let pattern_preview: String = t.pattern.chars().take(42).collect();
+                let title = format!(
+                    "{}  {}{}   {}",
+                    if t.enabled { "✅" } else { "⛔" },
+                    if t.name.trim().is_empty() { "(sans nom)" } else { t.name.as_str() },
+                    badges,
+                    pattern_preview
+                );
+                egui::CollapsingHeader::new(title)
+                    .id_salt(("trigger", i))
+                    .default_open(false)
+                    .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        changed |= ui.checkbox(&mut t.enabled, "").changed();
+                        changed |= ui.checkbox(&mut t.enabled, "Actif").changed();
                         ui.label("Nom :");
                         changed |= ui
                             .add(egui::TextEdit::singleline(&mut t.name).desired_width(180.0))
@@ -1220,7 +1268,17 @@ impl App {
     }
 
     fn ui_settings_inner(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Fichier de log");
+        section(ui, "📄 Fichier de log & personnage", true, |ui| {
+            self.settings_log(ui, ctx)
+        });
+        section(ui, "⚔ Combat", false, |ui| self.settings_combat(ui));
+        section(ui, "💾 Historique", false, |ui| self.settings_history(ui));
+        section(ui, "🐾 Pets", false, |ui| self.settings_pets(ui));
+        section(ui, "🎨 Overlay", false, |ui| self.settings_overlay(ui));
+        section(ui, "🔄 Mises à jour", false, |ui| self.settings_updates(ui));
+    }
+
+    fn settings_log(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Répertoire logs EQ2 :");
             ui.label(RichText::new(self.config.logs_dir.display().to_string()).monospace());
@@ -1309,9 +1367,9 @@ impl App {
         if let Some(p) = attach {
             self.attach(p, ctx.clone());
         }
+    }
 
-        ui.separator();
-        ui.heading("Combat");
+    fn settings_combat(&mut self, ui: &mut egui::Ui) {
         if ui
             .add(
                 egui::Slider::new(&mut self.config.encounter_timeout, 3..=30)
@@ -1349,8 +1407,9 @@ impl App {
             self.config.save();
         }
 
-        ui.separator();
-        ui.heading("Historique");
+    }
+
+    fn settings_history(&mut self, ui: &mut egui::Ui) {
         let mut hist_changed = false;
         hist_changed |= ui
             .checkbox(
@@ -1389,8 +1448,9 @@ impl App {
             self.config.save();
         }
 
-        ui.separator();
-        ui.heading("Pets");
+    }
+
+    fn settings_pets(&mut self, ui: &mut egui::Ui) {
         if ui
             .checkbox(
                 &mut self.config.merge_pets,
@@ -1434,8 +1494,9 @@ impl App {
             }
         }
 
-        ui.separator();
-        ui.heading("Overlay");
+    }
+
+    fn settings_overlay(&mut self, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("💡 Clic droit sur l'overlay lui-même pour ces réglages en jeu.")
                 .weak()
@@ -1645,8 +1706,9 @@ impl App {
             self.config.save();
         }
 
-        ui.separator();
-        ui.heading("Mises à jour");
+    }
+
+    fn settings_updates(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(format!(
                 "Version actuelle : v{}",
@@ -2072,6 +2134,14 @@ fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
 
 fn matches_filter(name: &str, filter: &str) -> bool {
     filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
+}
+
+/// Section de réglages repliable avec titre stylé.
+fn section(ui: &mut egui::Ui, title: &str, open: bool, content: impl FnOnce(&mut egui::Ui)) {
+    egui::CollapsingHeader::new(RichText::new(title).size(17.0).strong())
+        .default_open(open)
+        .show(ui, content);
+    ui.add_space(6.0);
 }
 
 /// Cellule-jauge : barre de progression colorée derrière la valeur (à la ACT).
@@ -2869,6 +2939,31 @@ impl App {
                 });
             }
             sections.retain(|sec| !sec.rows.is_empty());
+        }
+
+        // Animation des barres : interpolation douce vers la fraction cible.
+        {
+            let dt = ctx.input(|i| i.stable_dt).min(0.1);
+            let k = 1.0 - (-8.0 * dt).exp();
+            let mut animating = false;
+            let mut live_keys: std::collections::HashSet<(&'static str, String)> =
+                std::collections::HashSet::new();
+            for sec in &mut sections {
+                for row in &mut sec.rows {
+                    let key = (sec.label, row.1.clone());
+                    let cur = self.bar_anim.entry(key.clone()).or_insert(row.3);
+                    *cur += (row.3 - *cur) * k;
+                    if (row.3 - *cur).abs() > 0.004 {
+                        animating = true;
+                    }
+                    row.3 = *cur;
+                    live_keys.insert(key);
+                }
+            }
+            self.bar_anim.retain(|k, _| live_keys.contains(k));
+            if animating {
+                ctx.request_repaint();
+            }
         }
 
         // Barre de titre : template custom si défini, sinon format auto.
