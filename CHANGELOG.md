@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.2 — Mode clair
+- Bascule ☀/🌙 en haut à droite : thème clair ou sombre, mémorisé
+- Jauges des tables adaptées aux deux thèmes
+
 ## v0.3.1 — Nouveautés dans l'app
 - Cette fenêtre ! Le changelog s'affiche une fois après chaque mise à jour
 - Bouton 📋 Nouveautés dans Settings → Mises à jour pour la revoir

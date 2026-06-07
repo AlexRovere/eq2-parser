@@ -26,17 +26,28 @@ fn player_color(name: &str) -> Color32 {
 }
 
 /// Applique le thème de l'application (palette, arrondis, espacements).
-fn apply_theme(ctx: &egui::Context) {
+fn apply_theme(ctx: &egui::Context, light: bool) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing.y = 6.0;
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    style.visuals = if light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
     let v = &mut style.visuals;
-    v.panel_fill = Color32::from_rgb(16, 17, 22);
-    v.window_fill = Color32::from_rgb(20, 21, 27);
-    v.extreme_bg_color = Color32::from_rgb(11, 12, 16);
-    v.faint_bg_color = Color32::from_rgb(24, 25, 32);
+    if light {
+        v.panel_fill = Color32::from_rgb(244, 245, 248);
+        v.window_fill = Color32::from_rgb(250, 250, 252);
+        v.faint_bg_color = Color32::from_rgb(233, 235, 240);
+    } else {
+        v.panel_fill = Color32::from_rgb(16, 17, 22);
+        v.window_fill = Color32::from_rgb(20, 21, 27);
+        v.extreme_bg_color = Color32::from_rgb(11, 12, 16);
+        v.faint_bg_color = Color32::from_rgb(24, 25, 32);
+    }
     v.selection.bg_fill = Color32::from_rgb(52, 152, 219).gamma_multiply(0.55);
-    v.hyperlink_color = Color32::from_rgb(93, 173, 226);
+    v.hyperlink_color = Color32::from_rgb(52, 120, 190);
     v.widgets.noninteractive.corner_radius = 4.into();
     v.widgets.inactive.corner_radius = 4.into();
     v.widgets.hovered.corner_radius = 4.into();
@@ -185,8 +196,8 @@ const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply_theme(&cc.egui_ctx);
         let mut config = Config::load();
+        apply_theme(&cc.egui_ctx, config.light_mode);
         let trigger_engine = TriggerEngine::new(&config.triggers);
         let engine = CombatEngine::new(config.encounter_timeout);
         // Premier lancement / mauvais chemin : détecte le répertoire EQ2.
@@ -793,6 +804,21 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Triggers, "🔔 Triggers");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "⚙ Settings");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Bascule de thème clair/sombre.
+                    let theme_icon = if self.config.light_mode { "🌙" } else { "☀" };
+                    if ui
+                        .button(theme_icon)
+                        .on_hover_text(if self.config.light_mode {
+                            "Passer en mode sombre"
+                        } else {
+                            "Passer en mode clair"
+                        })
+                        .clicked()
+                    {
+                        self.config.light_mode = !self.config.light_mode;
+                        apply_theme(ctx, self.config.light_mode);
+                        self.config.save();
+                    }
                     // Bandeau de mise à jour.
                     if self.updating {
                         ui.label(
@@ -2219,8 +2245,10 @@ fn gauge_cell(ui: &mut egui::Ui, text: &str, frac: f32, color: Color32) {
         egui::vec2(ui.available_width().max(80.0), 16.0),
         egui::Sense::hover(),
     );
+    let text_color = ui.visuals().strong_text_color();
+    let track = ui.visuals().faint_bg_color;
     let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 8));
+    painter.rect_filled(rect, 2.0, track);
     let fill = egui::Rect::from_min_size(
         rect.min,
         egui::vec2(rect.width() * frac.clamp(0.0, 1.0), rect.height()),
@@ -2231,7 +2259,7 @@ fn gauge_cell(ui: &mut egui::Ui, text: &str, frac: f32, color: Color32) {
         egui::Align2::RIGHT_CENTER,
         text,
         egui::FontId::monospace(12.0),
-        Color32::WHITE,
+        text_color,
     );
 }
 

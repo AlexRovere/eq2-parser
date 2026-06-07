@@ -71,6 +71,8 @@ pub struct Config {
     pub pet_assignments: HashMap<String, String>,
     /// Dernière version dont les nouveautés ont été vues (fenêtre changelog).
     pub last_seen_version: String,
+    /// Thème clair (par défaut : sombre).
+    pub light_mode: bool,
 }
 
 impl Default for Config {
@@ -110,6 +112,7 @@ impl Default for Config {
             history_cap: 500,
             pet_assignments: HashMap::new(),
             last_seen_version: String::new(),
+            light_mode: false,
         }
     }
 }
