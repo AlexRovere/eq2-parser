@@ -479,7 +479,7 @@ impl App {
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.heading(RichText::new("⚔ EQ2 Tools").size(26.0));
+            ui.heading(RichText::new("⚔ EQ2 Parser").size(26.0));
             ui.label(RichText::new("Combat parser & overlay pour EverQuest II").weak());
             ui.add_space(20.0);
 
@@ -3630,7 +3630,7 @@ impl App {
                     base
                 }
             }
-            None => "EQ2 Tools — en attente".to_string(),
+            None => "EQ2 Parser — en attente".to_string(),
             }
         };
 

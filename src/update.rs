@@ -56,7 +56,7 @@ fn fetch_latest() -> Option<UpdateInfo> {
     let resp = ureq::get(&format!(
         "https://api.github.com/repos/{REPO}/releases/latest"
     ))
-    .set("User-Agent", "eq2-tools-updater")
+    .set("User-Agent", "eq2-parser-updater")
     .timeout(Duration::from_secs(10))
     .call()
     .ok()?;
@@ -77,7 +77,7 @@ fn fetch_latest() -> Option<UpdateInfo> {
 /// Ne retourne que en cas d'erreur (succès = exit du process).
 pub fn apply(url: &str) -> Result<(), String> {
     let resp = ureq::get(url)
-        .set("User-Agent", "eq2-tools-updater")
+        .set("User-Agent", "eq2-parser-updater")
         .timeout(Duration::from_secs(300))
         .call()
         .map_err(|e| format!("téléchargement : {e}"))?;

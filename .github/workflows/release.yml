@@ -28,5 +28,5 @@ jobs:
       - name: Publier la release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/eq2-tools.exe
+          files: target/release/eq2-parser.exe
           generate_release_notes: true

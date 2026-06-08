@@ -220,17 +220,29 @@ impl Config {
     }
 }
 
-fn config_path() -> PathBuf {
+/// Chemin d'un fichier de config (`<nom>`) à côté de l'exécutable.
+fn beside_exe(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("eq2-tools.json")))
-        .unwrap_or_else(|| PathBuf::from("eq2-tools.json"))
+        .and_then(|p| p.parent().map(|d| d.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn config_path() -> PathBuf {
+    beside_exe("eq2-parser.json")
+}
+
+/// Ancien nom (avant le renommage du projet) — lu en repli pour migrer.
+fn legacy_config_path() -> PathBuf {
+    beside_exe("eq2-tools.json")
 }
 
 impl Config {
     pub fn load() -> Self {
-        std::fs::read_to_string(config_path())
-            .ok()
+        // Nouveau fichier, sinon migration depuis l'ancien `eq2-tools.json`.
+        let raw = std::fs::read_to_string(config_path())
+            .or_else(|_| std::fs::read_to_string(legacy_config_path()));
+        raw.ok()
             .and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok())
             .unwrap_or_default()
     }

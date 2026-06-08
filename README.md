@@ -1,4 +1,4 @@
-# EQ2 Tools — Combat Parser & Overlay
+# EQ2 Parser — Combat Parser & Overlay
 
 Parser de logs de combat **EverQuest II** en temps réel avec overlay DPS/HPS, façon
 ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
@@ -82,13 +82,14 @@ Activer le logging dans EQ2 : taper `/log` en jeu (les fichiers vont dans
 
 ## Utilisation
 
-1. Lancer `eq2-tools.exe`.
+1. Lancer `eq2-parser.exe`.
 2. Onglet **⚙ Settings** : vérifier le répertoire logs, cliquer sur ton personnage
    dans la liste (trié du plus récent au plus ancien).
 3. Jouer. L'overlay s'anime dès le premier combat.
 
-La configuration est sauvegardée dans `eq2-tools.json` à côté de l'exe
-(dernier log suivi réattaché automatiquement au lancement).
+La configuration est sauvegardée dans `eq2-parser.json` à côté de l'exe
+(dernier log suivi réattaché automatiquement au lancement ; migration auto
+depuis l'ancien `eq2-tools.json`).
 
 ## Formats de log supportés
 
@@ -104,7 +105,7 @@ Calibré et validé à 100 % sur de vrais logs (client EN, serveurs live/TLE) :
 ## Build
 
 ```bash
-cargo build --release          # → target/release/eq2-tools.exe
+cargo build --release          # → target/release/eq2-parser.exe
 cargo test                     # tests unitaires du parser et du moteur
 cargo run --release --example parse_file -- "<chemin>\eq2log_X.txt"   # valider la couverture sur un log
 ```

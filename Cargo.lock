@@ -1282,7 +1282,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7e7a64c02cf7a5b51e745a9e45f60660a286f151c238b9d397b3e923f5082f"
 
 [[package]]
-name = "eq2-tools"
+name = "eq2-parser"
 version = "0.4.0"
 dependencies = [
  "eframe",
