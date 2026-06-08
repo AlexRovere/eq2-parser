@@ -16,6 +16,10 @@
   deviennent des mécaniques, les triggers atterrissent dans l'onglet Triggers
 - Pack de triggers de base en un clic (ready check, bannière de ralliement,
   death prevents, debuffs de classe à recast, manastone…)
+- Renommage en « EQ2 Parser » + nouvelle icône
+- Synthèse vocale fiabilisée (SAPI Windows), bips intégrés sélectionnables
+  (simple, grave, aigu, double, triple, montée, alarme), nouveau trigger
+  ajouté en haut de la liste
 
 ## v0.3.2 — Mode clair
 - Bascule ☀/🌙 en haut à droite : thème clair ou sombre, mémorisé
