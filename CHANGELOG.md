@@ -12,6 +12,10 @@
   localement, et saisie manuelle. Import / export pour la partager
 - Plus tu joues, plus la base s'enrichit (et tu peux me l'envoyer pour qu'elle
   profite à tout le monde)
+- Import de packs ACT (.xml) : bouton 🗡 Pack ACT — les timers de boss
+  deviennent des mécaniques, les triggers atterrissent dans l'onglet Triggers
+- Pack de triggers de base en un clic (ready check, bannière de ralliement,
+  death prevents, debuffs de classe à recast, manastone…)
 
 ## v0.3.2 — Mode clair
 - Bascule ☀/🌙 en haut à droite : thème clair ou sombre, mémorisé

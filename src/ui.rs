@@ -202,6 +202,9 @@ pub struct App {
 /// Changelog embarqué dans l'exécutable (mis à jour à chaque release).
 const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 
+/// Pack de triggers raid génériques embarqué (ready check, death prevents…).
+const TRIGGERS_PACK: &str = include_str!("../assets/triggers_pack.json");
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut config = Config::load();
@@ -420,6 +423,58 @@ impl App {
         self.mech_warned.retain(|k, _| seen.contains(k));
     }
 
+    /// Importe une config ACT (XML) : SpellTimers → mécaniques, CustomTriggers →
+    /// triggers (dédupliqués par pattern). Retourne (mécaniques, triggers) ajoutés.
+    fn import_act_pack(&mut self, xml: &str) -> (usize, usize) {
+        let res = crate::act_import::parse_act_xml(xml);
+        // Mécaniques : fusion sans écraser l'existant.
+        let mut add = crate::mechanics::MechanicsDb::default();
+        add.entries = res.mechanics;
+        let before = self.engine.mech.db.entries.len();
+        self.engine.mech.db.merge(&add, false);
+        let mech_added = self.engine.mech.db.entries.len() - before;
+        if mech_added > 0 {
+            self.engine.mech.dirty = true;
+            self.engine.mech.save_if_dirty();
+        }
+        // Triggers : ajoute ceux dont le pattern est nouveau.
+        let existing: std::collections::HashSet<String> =
+            self.config.triggers.iter().map(|t| t.pattern.clone()).collect();
+        let mut trig_added = 0;
+        for t in res.triggers {
+            if !t.pattern.is_empty() && !existing.contains(&t.pattern) {
+                self.config.triggers.push(t);
+                trig_added += 1;
+            }
+        }
+        if trig_added > 0 {
+            self.trigger_engine.recompile(&self.config.triggers);
+            self.config.save();
+        }
+        (mech_added, trig_added)
+    }
+
+    /// Ajoute le pack de triggers de base embarqué (sans doublon de pattern).
+    fn add_base_triggers(&mut self) -> usize {
+        let Ok(pack) = serde_json::from_str::<Vec<Trigger>>(TRIGGERS_PACK) else {
+            return 0;
+        };
+        let existing: std::collections::HashSet<String> =
+            self.config.triggers.iter().map(|t| t.pattern.clone()).collect();
+        let mut added = 0;
+        for t in pack {
+            if !existing.contains(&t.pattern) {
+                self.config.triggers.push(t);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            self.trigger_engine.recompile(&self.config.triggers);
+            self.config.save();
+        }
+        added
+    }
+
     /// Écran d'accueil : guide l'utilisateur jusqu'au premier combat parsé.
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
@@ -498,6 +553,13 @@ impl App {
             return;
         }
         let mut open = true;
+        // Borne la fenêtre à l'écran : sur petit écran, sans ça, le contenu pousse
+        // la fenêtre au-delà du bord et le bouton/scroll deviennent inaccessibles.
+        let screen = ctx.screen_rect().size();
+        let max_w = (screen.x - 32.0).clamp(280.0, 520.0);
+        let max_h = (screen.y - 40.0).max(200.0);
+        // Hauteur du scroll = ce qui reste sous le titre, le séparateur et le bouton.
+        let scroll_h = (max_h - 96.0).max(120.0);
         egui::Window::new(format!(
             "✨ Nouveautés — v{}",
             crate::update::CURRENT_VERSION
@@ -505,10 +567,15 @@ impl App {
         .id(egui::Id::new("changelog_window"))
         .open(&mut open)
         .collapsible(false)
-        .default_size([520.0, 420.0])
+        .default_size([520.0_f32.min(max_w), 420.0_f32.min(max_h)])
+        .max_width(max_w)
+        .max_height(max_h)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(scroll_h)
+                .show(ui, |ui| {
                 for line in CHANGELOG.lines() {
                     if line.starts_with("# ") {
                         continue; // titre du fichier
@@ -1216,6 +1283,41 @@ impl App {
             if ui.button("➕ Ajouter").clicked() {
                 self.config.triggers.push(Trigger::default());
             }
+            if ui
+                .button("📦 Pack de base")
+                .on_hover_text(
+                    "Ajoute des triggers raid génériques : ready check, bannière, \
+                     death prevents, debuffs de classe à recast, manastone…",
+                )
+                .clicked()
+            {
+                let n = self.add_base_triggers();
+                self.trigger_engine.toasts.push(crate::triggers::Toast {
+                    text: format!("{n} triggers de base ajoutés"),
+                    created: Instant::now(),
+                });
+            }
+            if ui
+                .button("🗡 Pack ACT")
+                .on_hover_text(
+                    "Importe une config ACT (.xml) : ses timers de boss vont dans \
+                     Mécaniques, ses triggers ici.",
+                )
+                .clicked()
+            {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Config ACT", &["xml"])
+                    .pick_file()
+                {
+                    if let Ok(xml) = std::fs::read_to_string(&p) {
+                        let (m, t) = self.import_act_pack(&xml);
+                        self.trigger_engine.toasts.push(crate::triggers::Toast {
+                            text: format!("ACT importé : {m} mécaniques, {t} triggers"),
+                            created: Instant::now(),
+                        });
+                    }
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("📥 Importer")
@@ -1558,6 +1660,29 @@ impl App {
                             .save_file()
                         {
                             self.engine.mech.db.save_to(&p);
+                        }
+                    }
+                    if ui
+                        .button("🗡 Pack ACT")
+                        .on_hover_text(
+                            "Importe une config ACT (.xml) : ses timers de boss deviennent \
+                             des mécaniques (et ses triggers vont dans l'onglet Triggers).",
+                        )
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("Config ACT", &["xml"])
+                            .pick_file()
+                        {
+                            if let Ok(xml) = std::fs::read_to_string(&p) {
+                                let (m, t) = self.import_act_pack(&xml);
+                                self.trigger_engine.toasts.push(crate::triggers::Toast {
+                                    text: format!(
+                                        "ACT importé : {m} mécaniques, {t} triggers"
+                                    ),
+                                    created: Instant::now(),
+                                });
+                            }
                         }
                     }
                 });

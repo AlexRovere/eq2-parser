@@ -257,19 +257,21 @@ impl MechanicsDb {
         serde_json::from_str(s.trim_start_matches('\u{feff}')).ok()
     }
 
-    fn index_of(&self, zone: &str, ability: &str) -> Option<usize> {
+    /// Clé d'identité : (zone, mob, capacité). Le mob discrimine les boss qui
+    /// partagent un nom de capacité (« Assault » n'a pas la même période partout).
+    fn index_of(&self, zone: &str, mob: &str, ability: &str) -> Option<usize> {
         self.entries
             .iter()
-            .position(|e| e.zone == zone && e.ability == ability)
+            .position(|e| e.zone == zone && e.mob == mob && e.ability == ability)
     }
 
-    pub fn find(&self, zone: &str, ability: &str) -> Option<&MechEntry> {
-        self.index_of(zone, ability).map(|i| &self.entries[i])
+    pub fn find(&self, zone: &str, mob: &str, ability: &str) -> Option<&MechEntry> {
+        self.index_of(zone, mob, ability).map(|i| &self.entries[i])
     }
 
     /// Insère ou remplace une entrée par sa clé.
     pub fn upsert(&mut self, entry: MechEntry) {
-        match self.index_of(&entry.zone, &entry.ability) {
+        match self.index_of(&entry.zone, &entry.mob, &entry.ability) {
             Some(i) => self.entries[i] = entry,
             None => self.entries.push(entry),
         }
@@ -279,7 +281,7 @@ impl MechanicsDb {
     /// écrasées que si `prefer_other` (utilisé pour faire primer le local sur l'embarqué).
     pub fn merge(&mut self, other: &MechanicsDb, prefer_other: bool) {
         for e in &other.entries {
-            match self.index_of(&e.zone, &e.ability) {
+            match self.index_of(&e.zone, &e.mob, &e.ability) {
                 Some(i) => {
                     if prefer_other {
                         self.entries[i] = e.clone();
@@ -293,22 +295,11 @@ impl MechanicsDb {
     /// Cumule les observations d'une autre base (agrégation multi-logs / multi-perso).
     pub fn absorb_db(&mut self, other: &MechanicsDb) {
         for e in &other.entries {
-            match self.index_of(&e.zone, &e.ability) {
+            match self.index_of(&e.zone, &e.mob, &e.ability) {
                 Some(i) => self.entries[i].absorb(e),
                 None => self.entries.push(e.clone()),
             }
         }
-    }
-
-    /// Entrées concernant une zone (zone exacte ou globale `""`), triées par impact.
-    pub fn for_zone(&self, zone: &str) -> Vec<&MechEntry> {
-        let mut v: Vec<&MechEntry> = self
-            .entries
-            .iter()
-            .filter(|e| e.enabled && (e.zone == zone || e.zone.is_empty()))
-            .collect();
-        v.sort_by(|a, b| b.impact_score().partial_cmp(&a.impact_score()).unwrap());
-        v
     }
 
     pub fn save_to(&self, path: &PathBuf) {
@@ -355,8 +346,8 @@ pub struct Learner {
     pub zone: String,
     /// Capacités nommées encaissées dans le combat en cours (résolues à la clôture).
     scratch: Vec<RawCast>,
-    /// Dernier cast vu par capacité dans le combat en cours (pour le live).
-    last_cast: HashMap<String, u64>,
+    /// Dernier cast vu par capacité (epoch, attaquant) dans le combat en cours.
+    last_cast: HashMap<String, (u64, String)>,
     /// Y a-t-il eu un apprentissage depuis la dernière sauvegarde ?
     pub dirty: bool,
 }
@@ -396,7 +387,8 @@ impl Learner {
                 amount,
             });
         }
-        self.last_cast.insert(ability.to_string(), epoch);
+        self.last_cast
+            .insert(ability.to_string(), (epoch, attacker.to_string()));
     }
 
     /// Réinitialise l'état lié au combat (à la clôture d'un encounter).
@@ -501,13 +493,15 @@ impl Learner {
                 continue;
             }
 
-            // Upsert dans la base apprise (cumul des observations).
+            // Upsert dans la base apprise (cumul des observations), identifiée
+            // par (zone, mob, capacité).
             let mut entry = self
                 .db
-                .find(&zone, &ability)
+                .find(&zone, &top_mob, &ability)
                 .cloned()
                 .unwrap_or_else(|| MechEntry {
                     zone: zone.clone(),
+                    mob: top_mob.clone(),
                     ability: ability.clone(),
                     source: MechSource::Learned,
                     ..Default::default()
@@ -542,19 +536,38 @@ impl Learner {
         }
     }
 
-    /// Prédictions live pour la zone courante, à l'instant `now` (epoch).
-    /// On ne prédit que les mécaniques chronométrées dont on a vu un cast dans ce combat.
+    /// Prédictions live à l'instant `now` (epoch) : une par capacité chronométrée
+    /// effectivement vue dans le combat en cours. Quand plusieurs entrées portent
+    /// le même nom de capacité (boss différents), on choisit la meilleure selon
+    /// l'attaquant observé puis la zone courante.
     pub fn predictions(&self, now: u64) -> Vec<Prediction> {
         let mut out = Vec::new();
-        for e in self.db.for_zone(&self.zone) {
-            if !e.is_timed() {
-                continue;
+        for (ability, (last, attacker)) in &self.last_cast {
+            // Candidats : entrées actives, chronométrées, de cette capacité.
+            let mut best: Option<&MechEntry> = None;
+            let mut best_score = -1i32;
+            for e in &self.db.entries {
+                if !e.enabled || !e.is_timed() || &e.ability != ability {
+                    continue;
+                }
+                // Score de pertinence : mob exact > zone exacte > générique.
+                let score = if !e.mob.is_empty() && &e.mob == attacker {
+                    3
+                } else if !e.zone.is_empty() && e.zone == self.zone {
+                    2
+                } else if e.mob.is_empty() && e.zone.is_empty() {
+                    1
+                } else {
+                    0
+                };
+                if score > best_score {
+                    best_score = score;
+                    best = Some(e);
+                }
             }
-            let Some(&last) = self.last_cast.get(&e.ability) else {
-                continue;
-            };
-            // Prochain cast attendu = dernier + période (on saute les périodes déjà passées).
-            let mut next = last as f64 + e.period;
+            let Some(e) = best else { continue };
+            // Prochain cast attendu = dernier + période (on saute les périodes passées).
+            let mut next = *last as f64 + e.period;
             while next < now as f64 - e.period * 0.5 {
                 next += e.period;
             }
@@ -671,7 +684,7 @@ mod tests {
         let entry = engine
             .mech
             .db
-            .find("", "Flame Nova")
+            .find("", "a dread boss", "Flame Nova")
             .expect("Flame Nova appris");
         assert_eq!(entry.period, 30.0);
         assert_eq!(entry.kind, MechKind::Aoe);
@@ -692,7 +705,7 @@ mod tests {
         }
         feed(&mut engine, &parser, &lines);
         engine.tick(2000);
-        assert!(engine.mech.db.find("", "Fireball").is_none());
+        assert!(!engine.mech.db.entries.iter().any(|e| e.ability == "Fireball"));
         let _ = HashSet::<String>::new();
     }
 
@@ -740,6 +753,6 @@ mod tests {
         });
         base.merge(&local, true);
         assert_eq!(base.entries.len(), 1);
-        assert_eq!(base.find("Z", "A").unwrap().period, 42.0);
+        assert_eq!(base.find("Z", "", "A").unwrap().period, 42.0);
     }
 }

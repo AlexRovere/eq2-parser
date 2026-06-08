@@ -32,6 +32,11 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
   décompte optionnel dans l'overlay). Base à trois sources qui partagent un format
   unique : communautaire embarquée, apprise localement, saisie manuelle. Import/export
   pour mutualiser (`mechanics.json`). Onglet **⏱ Mécaniques** : prédictions live + éditeur.
+- **Import de packs ACT** (Advanced Combat Tracker) : un bouton 🗡 avale une config
+  ACT `.xml` — les `SpellTimers` (timers de boss) deviennent des mécaniques, les
+  `CustomTriggers` deviennent des triggers (templates `${x}`→`{x}`, grossièretés
+  nettoyées). Pack de triggers de base générique intégré (ready check, bannière,
+  death prevents, debuffs à recast…).
 - **Multi-personnages** : détection automatique des logs `eq2log_*.txt` par serveur,
   résolution de YOU/YOUR vers le nom du perso.
 - **Attribution des pets** : auto-détection (fenêtre de 4 s après
@@ -127,11 +132,14 @@ src/
 ├── tailer.rs    tail temps réel du fichier (thread, gère rotation/troncature)
 ├── triggers.rs  triggers regex → audio (rodio) + toasts
 ├── mechanics.rs apprentissage des mécaniques récurrentes + prédiction + base partagée
+├── act_import.rs import de configs ACT (.xml) → mécaniques + triggers
 ├── export.rs    exports chat / Markdown / CSV / JSON
 ├── config.rs    persistance JSON (réglages, triggers, assignations pets)
 └── ui.rs        onglets Live/Encounters/Triggers/Mécaniques/Settings + overlay + graphe
 ```
 
-L'outil hors-ligne `cargo run --release --example mine_mechanics -- <dossier_logs> --write`
-mine tous les logs d'un coup pour (re)générer la base communautaire embarquée
-(`assets/mechanics.json`).
+Outils hors-ligne :
+- `cargo run --release --example mine_mechanics -- <dossier_logs> --write` mine tous
+  les logs d'un coup pour (re)générer la base embarquée (`assets/mechanics.json`).
+- `cargo run --release --example import_act -- <config_ACT.xml> --write` fusionne une
+  config ACT dans la base embarquée et exporte ses triggers convertis.

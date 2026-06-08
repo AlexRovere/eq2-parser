@@ -77,6 +77,8 @@ Mis à jour : 2026-06-07.
       période et prédiction du prochain cast (alerte toast/son/voix, décompte overlay).
       Base à 3 sources (communautaire embarquée + apprise + manuelle), import/export,
       outil de minage hors-ligne `mine_mechanics`.
+- [x] **Import de packs ACT** (.xml) : SpellTimers → mécaniques, CustomTriggers →
+      triggers, en un bouton + outil `import_act`. Pack de triggers de base embarqué.
 
 ## 🟢 Plus tard / niche
 

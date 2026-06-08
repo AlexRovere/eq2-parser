@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod act_import;
 mod combat;
 mod config;
 mod export;
