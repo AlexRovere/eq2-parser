@@ -11,14 +11,75 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+/// Sons de bip intégrés, sélectionnables quand aucun fichier audio n'est choisi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BeepKind {
+    Simple,
+    Low,
+    High,
+    Double,
+    Triple,
+    Rising,
+    Alarm,
+}
+
+impl Default for BeepKind {
+    fn default() -> Self {
+        BeepKind::Simple
+    }
+}
+
+impl BeepKind {
+    pub const ALL: [BeepKind; 7] = [
+        BeepKind::Simple,
+        BeepKind::Low,
+        BeepKind::High,
+        BeepKind::Double,
+        BeepKind::Triple,
+        BeepKind::Rising,
+        BeepKind::Alarm,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BeepKind::Simple => "Bip simple",
+            BeepKind::Low => "Bip grave",
+            BeepKind::High => "Bip aigu",
+            BeepKind::Double => "Double bip",
+            BeepKind::Triple => "Triple bip",
+            BeepKind::Rising => "Montée",
+            BeepKind::Alarm => "Alarme",
+        }
+    }
+
+    /// Séquence de notes `(fréquence Hz, durée ms)` ; fréquence 0 = silence.
+    fn notes(&self) -> &'static [(f32, u64)] {
+        match self {
+            BeepKind::Simple => &[(880.0, 200)],
+            BeepKind::Low => &[(440.0, 260)],
+            BeepKind::High => &[(1320.0, 160)],
+            BeepKind::Double => &[(880.0, 110), (0.0, 70), (880.0, 110)],
+            BeepKind::Triple => {
+                &[(988.0, 90), (0.0, 60), (988.0, 90), (0.0, 60), (988.0, 90)]
+            }
+            BeepKind::Rising => &[(660.0, 90), (784.0, 90), (1047.0, 150)],
+            BeepKind::Alarm => {
+                &[(740.0, 140), (0.0, 50), (1100.0, 150), (0.0, 50), (740.0, 140)]
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Trigger {
     pub name: String,
     pub pattern: String,
     pub enabled: bool,
-    /// Chemin d'un fichier audio (wav/mp3/ogg). None = bip par défaut.
+    /// Chemin d'un fichier audio (wav/mp3/ogg). None = bip intégré (`beep`).
     pub sound: Option<PathBuf>,
+    /// Bip intégré utilisé quand `sound` est None.
+    pub beep: BeepKind,
     /// Afficher un toast dans l'overlay.
     pub show_toast: bool,
     /// Lire le message en synthèse vocale.
@@ -40,6 +101,7 @@ impl Default for Trigger {
             pattern: String::new(),
             enabled: true,
             sound: None,
+            beep: BeepKind::default(),
             show_toast: true,
             tts: false,
             message: String::new(),
@@ -72,7 +134,7 @@ impl ActiveTimer {
 }
 
 pub enum SoundCmd {
-    Beep,
+    Beep(BeepKind),
     Play(PathBuf),
     Speak(String),
 }
@@ -157,8 +219,8 @@ impl TriggerEngine {
                     let _ = self.sound_tx.send(SoundCmd::Play(p.clone()));
                 }
                 None if !t.tts => {
-                    // Bip par défaut seulement si pas de TTS (sinon redondant).
-                    let _ = self.sound_tx.send(SoundCmd::Beep);
+                    // Bip intégré seulement si pas de TTS (sinon redondant).
+                    let _ = self.sound_tx.send(SoundCmd::Beep(t.beep));
                 }
                 None => {}
             }
@@ -195,16 +257,16 @@ impl TriggerEngine {
                 text: format!("⏰ {label}"),
                 created: Instant::now(),
             });
-            let _ = self.sound_tx.send(SoundCmd::Beep);
+            let _ = self.sound_tx.send(SoundCmd::Beep(BeepKind::Double));
         }
         self.toasts
             .retain(|t| t.created.elapsed() < Duration::from_secs(5));
     }
 
-    pub fn test_sound(&self, sound: &Option<PathBuf>) {
+    pub fn test_sound(&self, sound: &Option<PathBuf>, beep: BeepKind) {
         let cmd = match sound {
             Some(p) => SoundCmd::Play(p.clone()),
-            None => SoundCmd::Beep,
+            None => SoundCmd::Beep(beep),
         };
         let _ = self.sound_tx.send(cmd);
     }
@@ -215,21 +277,23 @@ impl TriggerEngine {
 }
 
 fn audio_loop(rx: Receiver<SoundCmd>) {
-    // OutputStream et Tts ne sont pas Send : créés et conservés dans ce thread.
+    // OutputStream n'est pas Send : créé et conservé dans ce thread.
     let stream = rodio::OutputStream::try_default().ok();
-    let mut tts_engine: Option<tts::Tts> = None;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            SoundCmd::Beep => {
+            SoundCmd::Beep(kind) => {
                 use rodio::source::{SineWave, Source};
                 if let Some((_, handle)) = &stream {
                     if let Ok(sink) = rodio::Sink::try_new(handle) {
-                        sink.append(
-                            SineWave::new(880.0)
-                                .take_duration(Duration::from_millis(220))
-                                .amplify(0.25),
-                        );
+                        for (freq, ms) in kind.notes() {
+                            // Fréquence 0 = silence (séparateur entre bips).
+                            sink.append(
+                                SineWave::new(*freq)
+                                    .take_duration(Duration::from_millis(*ms))
+                                    .amplify(if *freq > 0.0 { 0.25 } else { 0.0 }),
+                            );
+                        }
                         sink.detach();
                     }
                 }
@@ -247,12 +311,27 @@ fn audio_loop(rx: Receiver<SoundCmd>) {
                 }
             }
             SoundCmd::Speak(text) => {
-                // Initialisation paresseuse du moteur TTS (WinRT).
-                if tts_engine.is_none() {
-                    tts_engine = tts::Tts::default().ok();
-                }
-                if let Some(t) = tts_engine.as_mut() {
-                    let _ = t.speak(text, false);
+                // On recrée le moteur à chaque énoncé : le backend WinRT ne
+                // rejoue pas de façon fiable quand on réutilise l'instance sur
+                // ce thread (symptôme « ne marche que la première fois »). On
+                // attend la fin de l'élocution pour garder le moteur vivant.
+                if let Ok(mut engine) = tts::Tts::default() {
+                    if engine.speak(&text, true).is_ok() {
+                        // Plancher estimé d'après la longueur (au cas où is_speaking
+                        // renverrait faux trop tôt et couperait la voix), puis on
+                        // suit is_speaking jusqu'à la fin, plafonné à 15 s.
+                        let floor = Duration::from_millis(
+                            (400 + text.chars().count() as u64 * 70).min(12_000),
+                        );
+                        let start = Instant::now();
+                        std::thread::sleep(Duration::from_millis(100));
+                        while start.elapsed() < floor
+                            || (engine.is_speaking().unwrap_or(false)
+                                && start.elapsed() < Duration::from_secs(15))
+                        {
+                            std::thread::sleep(Duration::from_millis(60));
+                        }
+                    }
                 }
             }
         }

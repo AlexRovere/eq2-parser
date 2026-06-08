@@ -8,7 +8,7 @@
 //! `${nom}`/`$1` → `{nom}`/`{1}`, et un nettoyage des grossièretés/noms perso.
 
 use crate::mechanics::{AlertMode, MechEntry, MechKind, MechSource};
-use crate::triggers::Trigger;
+use crate::triggers::{BeepKind, Trigger};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -217,6 +217,7 @@ pub fn parse_act_xml(xml: &str) -> ImportResult {
             pattern,
             enabled: active,
             sound,
+            beep: BeepKind::default(),
             show_toast: true,
             tts,
             message,

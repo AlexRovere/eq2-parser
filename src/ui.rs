@@ -7,7 +7,7 @@ use crate::export;
 use crate::mechanics::{AlertMode, MechEntry, MechKind, MechSource};
 use crate::parser::{char_name_from_path, Parser};
 use crate::tailer::{discover_logs, Tailer};
-use crate::triggers::{Trigger, TriggerEngine};
+use crate::triggers::{BeepKind, Trigger, TriggerEngine};
 use eframe::egui::{self, Color32, RichText};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -414,7 +414,7 @@ impl App {
                 m => m,
             };
             match mode {
-                AlertMode::Sound => self.trigger_engine.test_sound(&None),
+                AlertMode::Sound => self.trigger_engine.test_sound(&None, BeepKind::Alarm),
                 AlertMode::Tts => self.trigger_engine.test_tts(&text),
                 _ => {}
             }
@@ -1281,7 +1281,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Triggers");
             if ui.button("➕ Ajouter").clicked() {
-                self.config.triggers.push(Trigger::default());
+                // Nouveau trigger en haut de la liste (plus visible).
+                self.config.triggers.insert(0, Trigger::default());
             }
             if ui
                 .button("📦 Pack de base")
@@ -1387,7 +1388,7 @@ impl App {
 
         let mut changed = false;
         let mut to_remove: Option<usize> = None;
-        let mut to_test: Option<Option<PathBuf>> = None;
+        let mut to_test: Option<(Option<PathBuf>, BeepKind)> = None;
         let mut to_test_tts: Option<String> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1500,8 +1501,24 @@ impl App {
                             t.sound = None;
                             changed = true;
                         }
+                        // Choix du bip intégré quand aucun fichier audio.
+                        if t.sound.is_none() {
+                            egui::ComboBox::from_id_salt(("beep", i))
+                                .selected_text(t.beep.label())
+                                .show_ui(ui, |ui| {
+                                    for b in BeepKind::ALL {
+                                        if ui
+                                            .selectable_label(t.beep == b, b.label())
+                                            .clicked()
+                                        {
+                                            t.beep = b;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        }
                         if ui.button("▶ Tester").clicked() {
-                            to_test = Some(t.sound.clone());
+                            to_test = Some((t.sound.clone(), t.beep));
                         }
                         if ui.button("🗑 Supprimer").clicked() {
                             to_remove = Some(i);
@@ -1511,8 +1528,8 @@ impl App {
             }
         });
 
-        if let Some(s) = to_test {
-            self.trigger_engine.test_sound(&s);
+        if let Some((s, b)) = to_test {
+            self.trigger_engine.test_sound(&s, b);
         }
         if let Some(msg) = to_test_tts {
             self.trigger_engine.test_tts(&msg);
