@@ -4,6 +4,7 @@
 use crate::combat::{fmt_duration, fmt_f64, fmt_num, CombatEngine, Encounter};
 use crate::config::Config;
 use crate::export;
+use crate::mechanics::{AlertMode, MechEntry, MechKind, MechSource};
 use crate::parser::{char_name_from_path, Parser};
 use crate::tailer::{discover_logs, Tailer};
 use crate::triggers::{Trigger, TriggerEngine};
@@ -73,6 +74,7 @@ enum Tab {
     Live,
     Encounters,
     Triggers,
+    Mechanics,
     Settings,
 }
 
@@ -189,6 +191,12 @@ pub struct App {
     updating: bool,
     /// Fenêtre « Nouveautés » (changelog embarqué).
     show_changelog: bool,
+    /// Mécaniques déjà alertées : capacité → epoch du cast annoncé (anti-spam).
+    mech_warned: HashMap<String, u64>,
+    /// Filtre texte de la base de mécaniques.
+    filter_mech: String,
+    /// Dernière sauvegarde de la base de mécaniques apprise.
+    last_mech_save: Instant,
 }
 
 /// Changelog embarqué dans l'exécutable (mis à jour à chaque release).
@@ -256,6 +264,9 @@ impl App {
             updating: false,
             // Après une mise à jour (ou au premier lancement), montre les nouveautés.
             show_changelog: config_seen_version != crate::update::CURRENT_VERSION,
+            mech_warned: HashMap::new(),
+            filter_mech: String::new(),
+            last_mech_save: Instant::now(),
         };
         // Attache automatique : le log le plus récemment écrit (perso actif),
         // sinon le dernier log suivi.
@@ -357,6 +368,56 @@ impl App {
         let mut owners = self.engine.auto_pets.clone();
         owners.extend(self.config.pet_assignments.clone());
         owners
+    }
+
+    /// Prédit les prochains casts de mécaniques et déclenche les alertes
+    /// (toast + son/voix) quelques secondes avant. Anti-spam par identité de cast.
+    fn process_mechanic_alerts(&mut self) {
+        if !self.config.mechanics_enabled {
+            return;
+        }
+        let now = Self::now_epoch();
+        let preds = self.engine.mech.predictions(now);
+        let default_alert = self.config.mech_default_alert;
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for p in &preds {
+            seen.insert(p.ability.clone());
+            // Fenêtre d'alerte : on annonce quand il reste ≤ lead s (et pas trop tard).
+            if p.eta > p.lead as f64 || p.eta < -1.5 {
+                continue;
+            }
+            // Identité du cast à venir (epoch arrondi) : une alerte par cycle.
+            let target = (now as f64 + p.eta).round().max(0.0) as u64;
+            if self.mech_warned.get(&p.ability) == Some(&target) {
+                continue;
+            }
+            self.mech_warned.insert(p.ability.clone(), target);
+            let eta_s = p.eta.max(0.0).round() as i64;
+            let text = if p.message.trim().is_empty() {
+                if eta_s > 0 {
+                    format!("{} {} dans {eta_s}s", p.kind.icon(), p.ability)
+                } else {
+                    format!("{} {} !", p.kind.icon(), p.ability)
+                }
+            } else {
+                p.message.replace("{eta}", &eta_s.to_string())
+            };
+            self.trigger_engine.toasts.push(crate::triggers::Toast {
+                text: text.clone(),
+                created: Instant::now(),
+            });
+            let mode = match p.alert {
+                AlertMode::Inherit => default_alert,
+                m => m,
+            };
+            match mode {
+                AlertMode::Sound => self.trigger_engine.test_sound(&None),
+                AlertMode::Tts => self.trigger_engine.test_tts(&text),
+                _ => {}
+            }
+        }
+        // Oublie les capacités qui ne sont plus suivies (fin de combat).
+        self.mech_warned.retain(|k, _| seen.contains(k));
     }
 
     /// Écran d'accueil : guide l'utilisateur jusqu'au premier combat parsé.
@@ -713,6 +774,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_history();
+        self.engine.mech.save_if_dirty();
         self.config.save();
     }
 
@@ -720,8 +782,15 @@ impl eframe::App for App {
         self.drain_lines();
         self.engine.tick(Self::now_epoch());
         self.trigger_engine.tick();
+        self.process_mechanic_alerts();
 
-        // Raccourcis clavier : Ctrl+1..4 = onglets, Échap = fermer le breakdown.
+        // Sauvegarde throttlée de la base de mécaniques apprise.
+        if self.engine.mech.dirty && self.last_mech_save.elapsed() > Duration::from_secs(30) {
+            self.engine.mech.save_if_dirty();
+            self.last_mech_save = Instant::now();
+        }
+
+        // Raccourcis clavier : Ctrl+1..5 = onglets, Échap = fermer le breakdown.
         ctx.input_mut(|i| {
             use egui::{Key, Modifiers};
             if i.consume_key(Modifiers::CTRL, Key::Num1) {
@@ -734,6 +803,9 @@ impl eframe::App for App {
                 self.tab = Tab::Triggers;
             }
             if i.consume_key(Modifiers::CTRL, Key::Num4) {
+                self.tab = Tab::Mechanics;
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Num5) {
                 self.tab = Tab::Settings;
             }
             if i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -802,6 +874,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Live, "⚔ Live");
                 ui.selectable_value(&mut self.tab, Tab::Encounters, "📜 Encounters");
                 ui.selectable_value(&mut self.tab, Tab::Triggers, "🔔 Triggers");
+                ui.selectable_value(&mut self.tab, Tab::Mechanics, "⏱ Mécaniques");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "⚙ Settings");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Bascule de thème clair/sombre.
@@ -881,6 +954,7 @@ impl eframe::App for App {
             Tab::Live => self.ui_live(ui),
             Tab::Encounters => self.ui_encounters(ui),
             Tab::Triggers => self.ui_triggers(ui),
+            Tab::Mechanics => self.ui_mechanics(ui),
             Tab::Settings => self.ui_settings(ui, ctx),
         });
 
@@ -1349,6 +1423,268 @@ impl App {
             self.trigger_engine.recompile(&self.config.triggers);
             self.config.save();
         }
+    }
+
+    fn ui_mechanics(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .id_salt("mech_scroll")
+            .show(ui, |ui| {
+                // Réglages globaux.
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .checkbox(&mut self.config.mechanics_enabled, "Activer les mécaniques")
+                        .changed()
+                    {
+                        self.config.save();
+                    }
+                    ui.separator();
+                    ui.label("Alerte par défaut :");
+                    let mut a = self.config.mech_default_alert;
+                    if alert_combo(ui, "mech_default_alert", &mut a, false) {
+                        self.config.mech_default_alert = a;
+                        self.config.save();
+                    }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.config.mech_overlay, "Décompte dans l'overlay")
+                        .changed()
+                    {
+                        self.config.save();
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "Sans base de sorts : l'app apprend des logs les capacités ennemies \
+                         récurrentes et impactantes (AoE, tank buster, mortelles) puis prévient \
+                         avant le prochain cast. Tu peux aussi en ajouter à la main et partager \
+                         ta base (Exporter).",
+                    )
+                    .weak()
+                    .size(12.0),
+                );
+                ui.separator();
+
+                // --- Prédictions live ---
+                let now = Self::now_epoch();
+                let zone = self.engine.mech.zone.clone();
+                let zlabel = if zone.is_empty() {
+                    "(zone inconnue)".to_string()
+                } else {
+                    zone.clone()
+                };
+                let preds = self.engine.mech.predictions(now);
+                ui.heading(format!("⏱ Prochaines mécaniques — {zlabel}"));
+                if preds.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "Aucune mécanique chronométrée en cours. Elles apparaissent dès \
+                             qu'un cast récurrent connu est repéré dans le combat.",
+                        )
+                        .weak(),
+                    );
+                } else {
+                    egui::Grid::new("mech_preds")
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            for p in preds.iter().take(12) {
+                                ui.label(format!("{} {}", p.kind.icon(), p.kind.label()));
+                                ui.label(RichText::new(&p.ability).strong());
+                                let frac = (p.eta / p.period.max(1.0)).clamp(0.0, 1.0) as f32;
+                                let urgent = p.eta <= p.lead as f64;
+                                let col = if urgent {
+                                    Color32::from_rgb(231, 76, 60)
+                                } else {
+                                    Color32::from_rgb(46, 204, 113)
+                                };
+                                let txt = if p.eta < 0.0 {
+                                    "maintenant".to_string()
+                                } else {
+                                    format!("{:.0}s", p.eta)
+                                };
+                                gauge_cell(ui, &txt, frac, col);
+                                ui.end_row();
+                            }
+                        });
+                }
+                ui.separator();
+
+                // --- Base de mécaniques (éditeur) ---
+                let mut do_save = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading(format!("📖 Base ({})", self.engine.mech.db.entries.len()));
+                    if ui.button("➕ Ajouter").clicked() {
+                        self.engine.mech.db.entries.insert(
+                            0,
+                            MechEntry {
+                                source: MechSource::Manual,
+                                ability: "Nouvelle capacité".into(),
+                                zone: zone.clone(),
+                                period: 30.0,
+                                ..Default::default()
+                            },
+                        );
+                        do_save = true;
+                    }
+                    if ui
+                        .button("📥 Importer")
+                        .on_hover_text("Fusionne un fichier mechanics.json partagé dans ta base.")
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .pick_file()
+                        {
+                            if let Ok(s) = std::fs::read_to_string(&p) {
+                                if let Some(db) = crate::mechanics::MechanicsDb::from_str(&s) {
+                                    self.engine.mech.db.absorb_db(&db);
+                                    do_save = true;
+                                }
+                            }
+                        }
+                    }
+                    if ui
+                        .button("📤 Exporter")
+                        .on_hover_text(
+                            "Exporte ta base pour la partager (à m'envoyer pour l'intégrer \
+                             à la base communautaire des prochaines versions).",
+                        )
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .set_file_name("mechanics.json")
+                            .add_filter("JSON", &["json"])
+                            .save_file()
+                        {
+                            self.engine.mech.db.save_to(&p);
+                        }
+                    }
+                });
+                filter_box(ui, &mut self.filter_mech, "filtrer (capacité, zone, mob)…");
+                let filter = self.filter_mech.to_lowercase();
+
+                // Tri par impact, filtre texte.
+                let mut idxs: Vec<usize> = (0..self.engine.mech.db.entries.len()).collect();
+                idxs.sort_by(|&a, &b| {
+                    self.engine.mech.db.entries[b]
+                        .impact_score()
+                        .partial_cmp(&self.engine.mech.db.entries[a].impact_score())
+                        .unwrap()
+                });
+                let mut to_delete: Option<usize> = None;
+                for i in idxs {
+                    let e = &self.engine.mech.db.entries[i];
+                    if !filter.is_empty()
+                        && !(e.ability.to_lowercase().contains(&filter)
+                            || e.zone.to_lowercase().contains(&filter)
+                            || e.mob.to_lowercase().contains(&filter))
+                    {
+                        continue;
+                    }
+                    let zlbl = if e.zone.is_empty() {
+                        "(toutes zones)".to_string()
+                    } else {
+                        e.zone.clone()
+                    };
+                    let period_lbl = if e.is_timed() {
+                        format!("toutes les {:.0}s", e.period)
+                    } else {
+                        "non chronométrée".to_string()
+                    };
+                    let src = match e.source {
+                        MechSource::Bundled => "📦",
+                        MechSource::Learned => "🧠",
+                        MechSource::Manual => "✍",
+                    };
+                    let dot = if e.enabled { "" } else { " (désactivée)" };
+                    let header =
+                        format!("{src} {} {} — {zlbl} · {period_lbl}{dot}", e.kind.icon(), e.ability);
+                    egui::CollapsingHeader::new(header)
+                        .id_salt(("mech_entry", i))
+                        .show(ui, |ui| {
+                            let e = &mut self.engine.mech.db.entries[i];
+                            let mut ch = false;
+                            ui.horizontal(|ui| {
+                                ch |= ui.checkbox(&mut e.enabled, "Activée").changed();
+                                if ui.button("🗑 Supprimer").clicked() {
+                                    to_delete = Some(i);
+                                }
+                            });
+                            egui::Grid::new(("mech_grid", i))
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Capacité");
+                                    ch |= ui.text_edit_singleline(&mut e.ability).changed();
+                                    ui.end_row();
+                                    ui.label("Zone");
+                                    ch |= ui.text_edit_singleline(&mut e.zone).changed();
+                                    ui.end_row();
+                                    ui.label("Mob");
+                                    ch |= ui.text_edit_singleline(&mut e.mob).changed();
+                                    ui.end_row();
+                                    ui.label("Type");
+                                    ch |= kind_combo(ui, i, &mut e.kind);
+                                    ui.end_row();
+                                    ui.label("Période (s)");
+                                    ch |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut e.period)
+                                                .range(0.0..=600.0)
+                                                .speed(0.5),
+                                        )
+                                        .on_hover_text("0 = non chronométrée (pas de décompte)")
+                                        .changed();
+                                    ui.end_row();
+                                    ui.label("Avance d'alerte (s)");
+                                    ch |= ui
+                                        .add(egui::DragValue::new(&mut e.lead).range(0..=60))
+                                        .changed();
+                                    ui.end_row();
+                                    ui.label("Alerte");
+                                    let mut a = e.alert;
+                                    if alert_combo(ui, ("alert", i), &mut a, true) {
+                                        e.alert = a;
+                                        ch = true;
+                                    }
+                                    ui.end_row();
+                                    ui.label("Message");
+                                    ch |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut e.message)
+                                                .hint_text("auto — {eta} = secondes restantes"),
+                                        )
+                                        .changed();
+                                    ui.end_row();
+                                });
+                            ui.label(
+                                RichText::new(format!(
+                                    "🧠 {} casts vus · {} échantillons · max {} · {} cibles · {} morts",
+                                    e.casts_seen,
+                                    e.samples,
+                                    fmt_num(e.max_hit),
+                                    e.max_targets,
+                                    e.lethal
+                                ))
+                                .weak()
+                                .size(11.0),
+                            );
+                            if ch {
+                                do_save = true;
+                            }
+                        });
+                }
+                if let Some(i) = to_delete {
+                    self.engine.mech.db.entries.remove(i);
+                    do_save = true;
+                }
+                if do_save {
+                    self.engine.mech.dirty = true;
+                    self.engine.mech.save_if_dirty();
+                    self.last_mech_save = Instant::now();
+                }
+            });
     }
 
     fn ui_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -2239,6 +2575,57 @@ fn section(ui: &mut egui::Ui, title: &str, open: bool, content: impl FnOnce(&mut
     ui.add_space(6.0);
 }
 
+/// Combo de sélection du type de mécanique. Retourne `true` si modifié.
+fn kind_combo(ui: &mut egui::Ui, id: impl std::hash::Hash, value: &mut MechKind) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(("kind", id))
+        .selected_text(format!("{} {}", value.icon(), value.label()))
+        .show_ui(ui, |ui| {
+            for k in [
+                MechKind::Aoe,
+                MechKind::TankBuster,
+                MechKind::Lethal,
+                MechKind::Burst,
+                MechKind::Other,
+            ] {
+                if ui
+                    .selectable_label(*value == k, format!("{} {}", k.icon(), k.label()))
+                    .clicked()
+                {
+                    *value = k;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// Combo de sélection du mode d'alerte. `include_inherit` ajoute « Par défaut ».
+fn alert_combo(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    value: &mut AlertMode,
+    include_inherit: bool,
+) -> bool {
+    let mut changed = false;
+    let opts: &[AlertMode] = if include_inherit {
+        &[AlertMode::Inherit, AlertMode::Visual, AlertMode::Sound, AlertMode::Tts]
+    } else {
+        &[AlertMode::Visual, AlertMode::Sound, AlertMode::Tts]
+    };
+    egui::ComboBox::from_id_salt(("alert", id))
+        .selected_text(value.label())
+        .show_ui(ui, |ui| {
+            for m in opts {
+                if ui.selectable_label(*value == *m, m.label()).clicked() {
+                    *value = *m;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
 /// Cellule-jauge : barre de progression colorée derrière la valeur (à la ACT).
 fn gauge_cell(ui: &mut egui::Ui, text: &str, frac: f32, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(
@@ -2958,6 +3345,29 @@ impl App {
             .iter()
             .map(|t| (t.label.clone(), t.remaining(), t.total))
             .collect();
+        // Comptes à rebours de mécaniques (optionnels) : (label, fraction restante, eta, urgent).
+        let mech_bars: Vec<(String, f32, f64, bool)> =
+            if self.config.mech_overlay && self.config.mechanics_enabled {
+                let now = Self::now_epoch();
+                self.engine
+                    .mech
+                    .predictions(now)
+                    .into_iter()
+                    .filter(|p| p.eta <= 30.0)
+                    .take(4)
+                    .map(|p| {
+                        let frac = (p.eta / p.period.max(1.0)).clamp(0.0, 1.0) as f32;
+                        (
+                            format!("{} {}", p.kind.icon(), p.ability),
+                            frac,
+                            p.eta.max(0.0),
+                            p.eta <= p.lead as f64,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let need_passthrough_cmd = !self.passthrough_sent;
 
         let cfg = &mut self.config;
@@ -3268,6 +3678,24 @@ impl App {
                                     &format!("{remaining:.0} s"),
                                     remaining / total.max(1.0),
                                     Color32::from_rgb(230, 126, 34),
+                                    Color32::WHITE,
+                                    s,
+                                );
+                            }
+
+                            // Comptes à rebours de mécaniques (prochains casts).
+                            for (label, frac, eta, urgent) in &mech_bars {
+                                let col = if *urgent {
+                                    Color32::from_rgb(231, 76, 60)
+                                } else {
+                                    Color32::from_rgb(46, 204, 113)
+                                };
+                                bar_row(
+                                    ui,
+                                    label,
+                                    &format!("{eta:.0} s"),
+                                    *frac,
+                                    col,
                                     Color32::WHITE,
                                     s,
                                 );

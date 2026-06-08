@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.0 — Mécaniques de boss
+
+- Nouvel onglet ⏱ Mécaniques : l'app apprend toute seule, depuis les logs, les
+  capacités ennemies récurrentes et dangereuses (AoE multi-cibles, tank buster,
+  coups mortels), sans aucune base de sorts
+- Prédiction du prochain cast avec compte à rebours, et alerte avant l'impact
+  (au choix : visuel, son ou voix, réglable par mécanique)
+- Décompte optionnel dans l'overlay
+- Base à trois sources, format unique : communautaire (embarquée), apprise
+  localement, et saisie manuelle. Import / export pour la partager
+- Plus tu joues, plus la base s'enrichit (et tu peux me l'envoyer pour qu'elle
+  profite à tout le monde)
+
 ## v0.3.2 — Mode clair
 - Bascule ☀/🌙 en haut à droite : thème clair ou sombre, mémorisé
 - Jauges des tables adaptées aux deux thèmes

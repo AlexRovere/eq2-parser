@@ -26,6 +26,12 @@ ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
 - **Wards & absorbs** : les absorptions sont créditées comme soins effectifs au poseur du ward.
 - **Triggers personnalisés** : regex sur les lignes du log → son (wav/mp3/ogg ou bip)
   + toast dans l'overlay.
+- **Mécaniques auto (sans base de sorts)** : l'app apprend des logs les capacités
+  ennemies récurrentes et impactantes (AoE multi-cibles, tank buster, mortelles),
+  mesure leur période et prévient avant le prochain cast (toast / son / voix réglables,
+  décompte optionnel dans l'overlay). Base à trois sources qui partagent un format
+  unique : communautaire embarquée, apprise localement, saisie manuelle. Import/export
+  pour mutualiser (`mechanics.json`). Onglet **⏱ Mécaniques** : prédictions live + éditeur.
 - **Multi-personnages** : détection automatique des logs `eq2log_*.txt` par serveur,
   résolution de YOU/YOUR vers le nom du perso.
 - **Attribution des pets** : auto-détection (fenêtre de 4 s après
@@ -120,7 +126,12 @@ src/
 ├── combat.rs    moteur d'encounters, séries temporelles, pets, fusion à l'affichage
 ├── tailer.rs    tail temps réel du fichier (thread, gère rotation/troncature)
 ├── triggers.rs  triggers regex → audio (rodio) + toasts
+├── mechanics.rs apprentissage des mécaniques récurrentes + prédiction + base partagée
 ├── export.rs    exports chat / Markdown / CSV / JSON
 ├── config.rs    persistance JSON (réglages, triggers, assignations pets)
-└── ui.rs        onglets Live/Encounters/Triggers/Settings + overlay + graphe (egui_plot)
+└── ui.rs        onglets Live/Encounters/Triggers/Mécaniques/Settings + overlay + graphe
 ```
+
+L'outil hors-ligne `cargo run --release --example mine_mechanics -- <dossier_logs> --write`
+mine tous les logs d'un coup pour (re)générer la base communautaire embarquée
+(`assets/mechanics.json`).

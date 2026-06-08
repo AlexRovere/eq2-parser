@@ -5,6 +5,8 @@
 
 #[path = "../src/parser.rs"]
 mod parser;
+#[path = "../src/mechanics.rs"]
+mod mechanics;
 #[path = "../src/combat.rs"]
 mod combat;
 

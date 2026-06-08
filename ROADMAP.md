@@ -72,10 +72,18 @@ Mis à jour : 2026-06-07.
 - [x] Profils d'overlay commutables (enregistrer/appliquer/supprimer dans
       Settings, boutons d'application rapide dans le menu clic droit)
 
+- [x] **Mécaniques auto-apprises** : sans base de sorts, détection des capacités
+      ennemies récurrentes/impactantes (AoE, tank buster, mortelles), mesure de la
+      période et prédiction du prochain cast (alerte toast/son/voix, décompte overlay).
+      Base à 3 sources (communautaire embarquée + apprise + manuelle), import/export,
+      outil de minage hors-ligne `mine_mechanics`.
+
 ## 🟢 Plus tard / niche
 
-- [ ] **Spell timers** : barres de durée des buffs/debuffs et recast
-      (nécessite une base de données des sorts EQ2 — gros chantier)
+- [ ] **Spell timers joueur** : durée des buffs/debuffs et recast de SES sorts
+      (différent des mécaniques ennemies : nécessiterait une DB de sorts ou une
+      mesure cast→fade, que les logs ne donnent pas toujours)
+- [ ] Enrichir la base communautaire embarquée au fil des logs de raid récupérés
 - [ ] Partage réseau du parse au groupe (serveur WebSocket local, overlay web OBS)
 - [ ] Upload/partage web des parses (gist, pastebin, site dédié)
 - [ ] Overheal / effective healing (si les logs le permettent)

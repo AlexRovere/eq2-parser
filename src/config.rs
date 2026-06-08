@@ -1,5 +1,6 @@
 //! Configuration persistée en JSON à côté de l'exécutable.
 
+use crate::mechanics::AlertMode;
 use crate::triggers::Trigger;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -73,6 +74,12 @@ pub struct Config {
     pub last_seen_version: String,
     /// Thème clair (par défaut : sombre).
     pub light_mode: bool,
+    /// Détection et alerte des mécaniques ennemies récurrentes.
+    pub mechanics_enabled: bool,
+    /// Mode d'alerte par défaut des mécaniques (surchargeable par mécanique).
+    pub mech_default_alert: AlertMode,
+    /// Afficher les comptes à rebours de mécaniques dans l'overlay.
+    pub mech_overlay: bool,
 }
 
 impl Default for Config {
@@ -113,6 +120,9 @@ impl Default for Config {
             pet_assignments: HashMap::new(),
             last_seen_version: String::new(),
             light_mode: false,
+            mechanics_enabled: true,
+            mech_default_alert: AlertMode::Sound,
+            mech_overlay: false,
         }
     }
 }

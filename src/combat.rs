@@ -1,6 +1,7 @@
 //! Moteur d'encounters façon ACT : un encounter démarre à la première action
 //! offensive et se termine après `timeout` secondes d'inactivité.
 
+use crate::mechanics::Learner;
 use crate::parser::{LogEvent, ParsedLine};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -490,6 +491,8 @@ pub struct CombatEngine {
     recent_hits: HashMap<String, VecDeque<RecentHit>>,
     /// Zone courante (`You have entered <Zone>.`).
     pub current_zone: String,
+    /// Apprentissage et prédiction des mécaniques ennemies récurrentes.
+    pub mech: Learner,
 }
 
 impl CombatEngine {
@@ -505,6 +508,7 @@ impl CombatEngine {
             known_players: HashSet::new(),
             recent_hits: HashMap::new(),
             current_zone: String::new(),
+            mech: Learner::new(),
         }
     }
 
@@ -524,6 +528,16 @@ impl CombatEngine {
     fn close_current(&mut self) {
         if let Some(mut enc) = self.current.take() {
             enc.finished = true;
+            // Apprentissage des mécaniques : on tranche alliés/ennemis sur l'encounter
+            // complet, puis on en déduit les capacités ennemies récurrentes/impactantes.
+            let allies = compute_allies(
+                &enc,
+                &self.self_name,
+                &self.known_players,
+                &self.auto_pets,
+            );
+            self.mech.learn_from(&enc, &allies);
+            self.mech.reset_encounter();
             // On ne garde pas les "encounters" sans aucun dégât (buffs hors combat…)
             // et on déduplique (ré-import d'un log déjà en historique).
             let duplicate = self.history.iter().any(|e| {
@@ -616,6 +630,11 @@ impl CombatEngine {
                         amount: *amount,
                     },
                 );
+                // Apprentissage des mécaniques : seuls les coups à capacité nommée
+                // comptent (les auto-attaques n'ont pas de nom de sort).
+                if let Some(ab) = ability {
+                    self.mech.observe(epoch, attacker, ab, target, *amount);
+                }
                 let enc = self.ensure_encounter(epoch);
                 enc.end = epoch;
                 enc.attacks
@@ -855,6 +874,7 @@ impl CombatEngine {
                 // Zoner termine le combat en cours.
                 self.close_current();
                 self.current_zone = zone.clone();
+                self.mech.zone = zone.clone();
             }
             LogEvent::StartFight | LogEvent::StopFight => {}
         }
