@@ -279,6 +279,8 @@ impl TriggerEngine {
 fn audio_loop(rx: Receiver<SoundCmd>) {
     // OutputStream n'est pas Send : créé et conservé dans ce thread.
     let stream = rodio::OutputStream::try_default().ok();
+    // Process SAPI persistant (System.Speech via PowerShell) pour le TTS.
+    let mut sapi: Option<std::process::Child> = None;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -311,31 +313,64 @@ fn audio_loop(rx: Receiver<SoundCmd>) {
                 }
             }
             SoundCmd::Speak(text) => {
-                // On recrée le moteur à chaque énoncé : le backend WinRT ne
-                // rejoue pas de façon fiable quand on réutilise l'instance sur
-                // ce thread (symptôme « ne marche que la première fois »). On
-                // attend la fin de l'élocution pour garder le moteur vivant.
-                if let Ok(mut engine) = tts::Tts::default() {
-                    if engine.speak(&text, true).is_ok() {
-                        // Plancher estimé d'après la longueur (au cas où is_speaking
-                        // renverrait faux trop tôt et couperait la voix), puis on
-                        // suit is_speaking jusqu'à la fin, plafonné à 15 s.
-                        let floor = Duration::from_millis(
-                            (400 + text.chars().count() as u64 * 70).min(12_000),
-                        );
-                        let start = Instant::now();
-                        std::thread::sleep(Duration::from_millis(100));
-                        while start.elapsed() < floor
-                            || (engine.is_speaking().unwrap_or(false)
-                                && start.elapsed() < Duration::from_secs(15))
-                        {
-                            std::thread::sleep(Duration::from_millis(60));
-                        }
-                    }
-                }
+                speak_sapi(&mut sapi, &text);
             }
         }
     }
+}
+
+/// Synthèse vocale via SAPI (System.Speech) piloté par un process PowerShell
+/// persistant : on charge l'assembly une seule fois, puis on envoie chaque
+/// énoncé sur une ligne de stdin. Fiable et répétable (contrairement au backend
+/// WinRT), faible latence après le premier appel, lecture séquentielle.
+fn speak_sapi(child: &mut Option<std::process::Child>, text: &str) {
+    use std::io::Write;
+    let line = text.replace(['\r', '\n'], " ");
+    if line.trim().is_empty() {
+        return;
+    }
+    // (Re)démarre le process s'il est absent ou mort.
+    let dead = match child {
+        Some(c) => matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
+        None => true,
+    };
+    if dead {
+        *child = spawn_sapi();
+    }
+    if let Some(c) = child {
+        if let Some(stdin) = c.stdin.as_mut() {
+            if writeln!(stdin, "{line}").and_then(|_| stdin.flush()).is_err() {
+                // Tube cassé : on tuera/relancera au prochain appel.
+                let _ = c.kill();
+                *child = None;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_sapi() -> Option<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Boucle qui lit stdin (UTF-8) et énonce chaque ligne via System.Speech.
+    let script = "[Console]::InputEncoding=[System.Text.Encoding]::UTF8; \
+         Add-Type -AssemblyName System.Speech; \
+         $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+         while($l=[Console]::In.ReadLine()){ if($l.Length -gt 0){ $s.Speak($l) } }";
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()
+}
+
+#[cfg(not(windows))]
+fn spawn_sapi() -> Option<std::process::Child> {
+    None
 }
 
 #[cfg(test)]
