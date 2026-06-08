@@ -156,11 +156,20 @@ fn main() {
                 bundle.entries.push(e);
             }
         }
+        // Fusion (et non écrasement) dans la base existante : on préserve les
+        // entrées déjà présentes (ex. importées d'ACT) et on cumule les minées.
         let path = PathBuf::from("assets/mechanics.json");
-        bundle.save_to(&path);
+        let mut db = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| MechanicsDb::from_str(&s))
+            .unwrap_or_default();
+        let before = db.entries.len();
+        db.absorb_db(&bundle);
+        db.save_to(&path);
         println!(
-            "\n✓ {} mécaniques chronométrées écrites dans {}",
+            "\n✓ {} mécaniques minées (confiance ≥5) fusionnées : {before} → {} dans {}",
             bundle.entries.len(),
+            db.entries.len(),
             path.display()
         );
     } else {

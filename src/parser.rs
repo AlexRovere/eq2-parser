@@ -560,9 +560,12 @@ impl Parser {
 }
 
 /// Extrait le nom du personnage depuis un chemin `eq2log_<Nom>.txt`.
+/// Gère aussi les logs archivés/datés `eq2log_<Nom>.2023.04.23.txt`
+/// (on ne garde que le segment avant le premier point).
 pub fn char_name_from_path(path: &std::path::Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
-    stem.strip_prefix("eq2log_").map(|s| s.to_string())
+    stem.strip_prefix("eq2log_")
+        .map(|s| s.split('.').next().unwrap_or(s).to_string())
 }
 
 #[cfg(test)]
@@ -1062,6 +1065,13 @@ mod tests {
                 r"X:\jeux\steam\steamapps\common\EverQuest 2\logs\Halls of Fate\eq2log_Pawkod.txt"
             )),
             Some("Pawkod".to_string())
+        );
+        // Logs archivés/datés : on ne garde que le nom.
+        assert_eq!(
+            char_name_from_path(std::path::Path::new(
+                r"C:\Users\x\Downloads\Varsoon\eq2log_Amnaliax.2023.04.23.txt"
+            )),
+            Some("Amnaliax".to_string())
         );
     }
 }
