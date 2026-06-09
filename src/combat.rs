@@ -392,6 +392,21 @@ impl Encounter {
 /// Infère l'ensemble des alliés d'un encounter par propagation :
 /// attaque = factions opposées, soin = même faction.
 /// Graines : soi-même, joueurs vus dans le chat, pets et leurs propriétaires.
+/// Les deux entités d'un événement de combat (attaquant/soigneur, cible), pour
+/// décider si l'événement concerne ton camp.
+fn combat_pair(ev: &LogEvent) -> Option<(&str, &str)> {
+    match ev {
+        LogEvent::Damage { attacker, target, .. } => Some((attacker, target)),
+        LogEvent::FailedHit { attacker, target } => Some((attacker, target)),
+        LogEvent::Miss { attacker, target, .. } => Some((attacker, target)),
+        LogEvent::Resist { attacker, target, .. } => Some((attacker, target)),
+        LogEvent::Heal { healer, target, .. } => Some((healer, target)),
+        LogEvent::WardApplied { caster, target, .. } => Some((caster, target)),
+        LogEvent::PowerRefresh { source, target, .. } => Some((source, target)),
+        _ => None,
+    }
+}
+
 pub fn compute_allies(
     enc: &Encounter,
     self_name: &str,
@@ -493,6 +508,13 @@ pub struct CombatEngine {
     pub current_zone: String,
     /// Apprentissage et prédiction des mécaniques ennemies récurrentes.
     pub mech: Learner,
+    /// Profilage des sorts des joueurs (optimisation de rotation).
+    pub prof: crate::optimizer::Profiler,
+    /// Clore le combat sur l'activité de ton camp (ignore les combats voisins).
+    pub anchor: bool,
+    /// Entités impliquées dans TON combat en cours (ton camp + ses ennemis),
+    /// pour ne pas garder l'encounter ouvert sur du combat voisin.
+    engaged: HashSet<String>,
 }
 
 impl CombatEngine {
@@ -509,7 +531,15 @@ impl CombatEngine {
             recent_hits: HashMap::new(),
             current_zone: String::new(),
             mech: Learner::new(),
+            prof: crate::optimizer::Profiler::new(),
+            anchor: true,
+            engaged: HashSet::new(),
         }
+    }
+
+    /// L'entité est-elle moi ou un de mes pets ?
+    fn mine(&self, n: &str) -> bool {
+        n == self.self_name || self.auto_pets.contains_key(n)
     }
 
     /// Enregistre un coup encaissé dans la fenêtre glissante du death report.
@@ -538,6 +568,10 @@ impl CombatEngine {
             );
             self.mech.learn_from(&enc, &allies);
             self.mech.reset_encounter();
+            // Profilage des sorts : replie le combat dans le cumul de session.
+            self.prof.flush();
+            // Réinitialise le suivi du camp pour le prochain combat.
+            self.engaged.clear();
             // On ne garde pas les "encounters" sans aucun dégât (buffs hors combat…)
             // et on déduplique (ré-import d'un log déjà en historique).
             let duplicate = self.history.iter().any(|e| {
@@ -592,6 +626,23 @@ impl CombatEngine {
             return;
         };
 
+        // Ancrage sur ton camp : un événement de combat n'est traité (donc ne
+        // garde pas ton combat ouvert) que s'il implique toi/un pet, un allié ou
+        // un ennemi déjà engagé par ton camp. Sans perso connu, on ne filtre pas.
+        if self.anchor && !self.self_name.is_empty() {
+            if let Some((a, b)) = combat_pair(event) {
+                let relevant = self.mine(a)
+                    || self.mine(b)
+                    || self.engaged.contains(a)
+                    || self.engaged.contains(b);
+                if !relevant {
+                    return; // combat voisin : ignoré
+                }
+                self.engaged.insert(a.to_string());
+                self.engaged.insert(b.to_string());
+            }
+        }
+
         match event {
             LogEvent::Damage { attacker, ability, target, amount, crit, damage_type } => {
                 // Auto-détection de pet dans les 4 s après "You send your pet in
@@ -634,6 +685,13 @@ impl CombatEngine {
                 // comptent (les auto-attaques n'ont pas de nom de sort).
                 if let Some(ab) = ability {
                     self.mech.observe(epoch, attacker, ab, target, *amount);
+                    // Profilage : seuls les sorts lancés par un joueur (le perso
+                    // suivi ou un coéquipier vu en chat), jamais les pets/PNJ.
+                    let is_player = *attacker == self.self_name
+                        || self.known_players.contains(attacker);
+                    if is_player && !self.auto_pets.contains_key(attacker) {
+                        self.prof.observe(epoch, attacker, ab, target, *amount, *crit);
+                    }
                 }
                 let enc = self.ensure_encounter(epoch);
                 enc.end = epoch;
@@ -969,6 +1027,34 @@ mod tests {
                 engine.process(&p);
             }
         }
+    }
+
+    #[test]
+    fn anchor_ignores_nearby_combat() {
+        let parser = Parser::new("Tank");
+        let mut engine = CombatEngine::new(6);
+        engine.self_name = "Tank".into();
+        engine.anchor = true;
+        feed(
+            &mut engine,
+            &parser,
+            &[
+                "(1000)[Tue May 26 17:42:26 2026] YOU hit Dread Mistmoore for 100 crushing damage.",
+                "(1001)[Tue May 26 17:42:27 2026] Dread Mistmoore hits Tank for 50 crushing damage.",
+                // Combat voisin sans rapport (inconnu vs trash) : doit être ignoré.
+                "(1002)[Tue May 26 17:42:28 2026] Stranger hits a wandering golem for 80 crushing damage.",
+                "(1004)[Tue May 26 17:42:30 2026] a wandering golem hits Stranger for 30 crushing damage.",
+                "(1006)[Tue May 26 17:42:32 2026] Stranger hits a wandering golem for 80 crushing damage.",
+            ],
+        );
+        let enc = engine.current.as_ref().unwrap();
+        assert!(enc.combatants.contains_key("Tank"));
+        assert!(enc.combatants.contains_key("Dread Mistmoore"));
+        // Le combat voisin n'entre pas dans ton encounter…
+        assert!(!enc.combatants.contains_key("Stranger"));
+        assert!(!enc.combatants.contains_key("a wandering golem"));
+        // …et ne prolonge pas ta fin de combat (reste à ta dernière action).
+        assert_eq!(enc.end, 1001);
     }
 
     #[test]

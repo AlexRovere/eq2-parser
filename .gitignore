@@ -2,3 +2,5 @@
 eq2-parser.json
 eq2-tools.json
 /test_logs
+# Feuille de calcul de référence (source perso, non nécessaire au build)
+assets/*.xlsx

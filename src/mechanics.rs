@@ -159,6 +159,17 @@ pub struct MechEntry {
     pub lethal: u32,
 }
 
+/// Un nom de mob est-il un named (boss) plutôt qu'un trash ? Les trash EQ2
+/// portent un article minuscule (« a golem », « an undead », « the guard ») ;
+/// les nameds sont des noms propres capitalisés (« Mayong Mistmoore »).
+pub fn is_named_mob(name: &str) -> bool {
+    let n = name.trim();
+    if n.starts_with("a ") || n.starts_with("an ") || n.starts_with("the ") {
+        return false;
+    }
+    n.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
 impl Default for MechEntry {
     fn default() -> Self {
         Self {
@@ -350,6 +361,9 @@ pub struct Learner {
     last_cast: HashMap<String, (u64, String)>,
     /// Y a-t-il eu un apprentissage depuis la dernière sauvegarde ?
     pub dirty: bool,
+    /// Timers de test (debug only) : (capacité, type, epoch de départ, période,
+    /// lead). Récurrents, fusionnés dans les prédictions, jamais persistés.
+    pub debug_timers: Vec<(String, MechKind, u64, f64, u64)>,
 }
 
 /// Prédiction live d'un prochain cast.
@@ -373,7 +387,21 @@ impl Learner {
             scratch: Vec::new(),
             last_cast: HashMap::new(),
             dirty: false,
+            debug_timers: Vec::new(),
         }
+    }
+
+    /// (debug) Ajoute un timer de test récurrent qui apparaît dans les prédictions.
+    #[cfg(debug_assertions)]
+    pub fn debug_add(&mut self, ability: &str, kind: MechKind, period: f64, now: u64) {
+        self.debug_timers
+            .push((ability.to_string(), kind, now, period, 5));
+    }
+
+    /// (debug) Vide les timers de test.
+    #[cfg(debug_assertions)]
+    pub fn debug_clear(&mut self) {
+        self.debug_timers.clear();
     }
 
     /// À appeler pour chaque coup à capacité nommée (l'enemy/ally est tranché à la clôture).
@@ -492,6 +520,12 @@ impl Learner {
             if !noteworthy {
                 continue;
             }
+            // On n'apprend que des nameds (boss) : un trash (golem lvl 2…) génère
+            // trop de faux positifs. Les entrées manuelles/bundlées ne sont pas
+            // concernées (elles n'arrivent pas par ce chemin).
+            if !is_named_mob(&top_mob) {
+                continue;
+            }
 
             // Upsert dans la base apprise (cumul des observations), identifiée
             // par (zone, mob, capacité).
@@ -504,6 +538,9 @@ impl Learner {
                     mob: top_mob.clone(),
                     ability: ability.clone(),
                     source: MechSource::Learned,
+                    // Apprises = silencieuses par défaut (toast visuel, pas de
+                    // bip) tant que tu ne les actives pas explicitement.
+                    alert: AlertMode::Visual,
                     ..Default::default()
                 });
             // Une entrée manuelle n'est pas écrasée par l'apprentissage (on enrichit juste les stats).
@@ -579,6 +616,21 @@ impl Learner {
                 lead: e.lead,
                 message: e.message.clone(),
                 alert: e.alert,
+            });
+        }
+        // Timers de test (debug) : récurrents, eta = temps restant dans le cycle.
+        for (ability, kind, start, period, lead) in &self.debug_timers {
+            let p = period.max(1.0);
+            let elapsed = now.saturating_sub(*start) as f64;
+            let eta = p - (elapsed % p);
+            out.push(Prediction {
+                ability: ability.clone(),
+                kind: *kind,
+                period: *period,
+                eta,
+                lead: *lead,
+                message: String::new(),
+                alert: AlertMode::Inherit,
             });
         }
         out.sort_by(|a, b| a.eta.partial_cmp(&b.eta).unwrap());
@@ -664,13 +716,13 @@ mod tests {
             (1000, "Healy's Mend heals Tank for 50 hit points.".to_string()),
         ];
         for s in (1000u64..=1130).step_by(3) {
-            events.push((s, "YOU hit a dread boss for 100 crushing damage.".to_string()));
+            events.push((s, "YOU hit Dread Mistmoore for 100 crushing damage.".to_string()));
         }
         for k in 0..5u64 {
             let t = 1000 + k * 30;
-            events.push((t, "a dread boss's Flame Nova hits Tank for 1000 heat damage.".to_string()));
-            events.push((t, "a dread boss's Flame Nova hits Healy for 1000 heat damage.".to_string()));
-            events.push((t, "a dread boss's Flame Nova hits Dpser for 1000 heat damage.".to_string()));
+            events.push((t, "Dread Mistmoore's Flame Nova hits Tank for 1000 heat damage.".to_string()));
+            events.push((t, "Dread Mistmoore's Flame Nova hits Healy for 1000 heat damage.".to_string()));
+            events.push((t, "Dread Mistmoore's Flame Nova hits Dpser for 1000 heat damage.".to_string()));
         }
         events.sort_by_key(|(t, _)| *t);
         let lines: Vec<String> = events
@@ -684,7 +736,7 @@ mod tests {
         let entry = engine
             .mech
             .db
-            .find("", "a dread boss", "Flame Nova")
+            .find("", "Dread Mistmoore", "Flame Nova")
             .expect("Flame Nova appris");
         assert_eq!(entry.period, 30.0);
         assert_eq!(entry.kind, MechKind::Aoe);

@@ -1,6 +1,7 @@
 //! Configuration persistée en JSON à côté de l'exécutable.
 
 use crate::mechanics::AlertMode;
+use crate::optimizer::PlayerStats;
 use crate::triggers::Trigger;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +16,9 @@ pub struct Config {
     pub last_log: Option<PathBuf>,
     /// Secondes d'inactivité avant clôture d'un encounter.
     pub encounter_timeout: u64,
+    /// Clore le combat sur l'activité de ton camp (toi/pets/alliés + ennemis
+    /// engagés) : ignore les combats voisins (joueurs hors groupe, PNJ).
+    pub encounter_anchor: bool,
     /// Relire tout le fichier à l'attache (import historique).
     pub import_existing: bool,
     /// Suivre automatiquement le log le plus récemment écrit (le perso actif).
@@ -78,8 +82,36 @@ pub struct Config {
     pub mechanics_enabled: bool,
     /// Mode d'alerte par défaut des mécaniques (surchargeable par mécanique).
     pub mech_default_alert: AlertMode,
-    /// Afficher les comptes à rebours de mécaniques dans l'overlay.
+    /// Afficher les comptes à rebours de mécaniques dans l'overlay DPS.
     pub mech_overlay: bool,
+    /// Overlay dédié aux mécaniques de boss (fenêtre séparée).
+    pub mech_overlay_window: bool,
+    pub mech_overlay_pos: Option<(f32, f32)>,
+    pub mech_overlay_width: f32,
+    pub mech_overlay_height: f32,
+    /// Optimisation : stats offensives saisies par personnage.
+    pub player_stats: HashMap<String, PlayerStats>,
+    /// Optimisation : temps de cast de base surchargés à la main, par sort.
+    pub cast_overrides: HashMap<String, f32>,
+    /// Optimisation : dégâts par cast saisis à la main (sorts pas encore vus
+    /// en combat), indexés par nom de sort.
+    pub spell_damage: HashMap<String, f64>,
+    /// Optimisation : nombre de cibles du scénario courant.
+    pub opt_targets: u32,
+    /// Optimisation : cibles liées (même encounter) pour le scaling AoE.
+    pub opt_linked: bool,
+    /// Optimisation : masquer les sorts hors-base (procs/pets/cast inféré).
+    /// Par défaut faux : on montre TOUT ce que le joueur a lancé, même si la
+    /// base ne connaît pas le sort (sinon des vrais casts disparaîtraient).
+    pub opt_hide_unknown: bool,
+    /// Optimisation : colonne de tri (dmg/crit/targets/cast/recast/eff/sustained).
+    pub opt_sort_key: String,
+    /// Optimisation : tri décroissant (défaut) ou croissant.
+    pub opt_sort_desc: bool,
+    /// Optimisation : sorts masqués (renvoyés en bas de liste, grisés).
+    pub opt_hidden: std::collections::HashSet<String>,
+    /// Classe détectée par personnage (auto-remplie à la détection du log).
+    pub char_class: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -88,6 +120,7 @@ impl Default for Config {
             logs_dir: PathBuf::from(r"X:\jeux\steam\steamapps\common\EverQuest 2\logs"),
             last_log: None,
             encounter_timeout: 6,
+            encounter_anchor: true,
             import_existing: false,
             auto_attach_latest: true,
             overlay_enabled: true,
@@ -123,6 +156,20 @@ impl Default for Config {
             mechanics_enabled: true,
             mech_default_alert: AlertMode::Sound,
             mech_overlay: false,
+            mech_overlay_window: false,
+            mech_overlay_pos: None,
+            mech_overlay_width: 250.0,
+            mech_overlay_height: 180.0,
+            player_stats: HashMap::new(),
+            cast_overrides: HashMap::new(),
+            spell_damage: HashMap::new(),
+            opt_targets: 1,
+            opt_linked: true,
+            opt_hide_unknown: false,
+            opt_sort_key: "eff".into(),
+            opt_sort_desc: true,
+            opt_hidden: std::collections::HashSet::new(),
+            char_class: HashMap::new(),
         }
     }
 }

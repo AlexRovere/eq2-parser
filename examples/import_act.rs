@@ -9,6 +9,8 @@
 mod parser;
 #[path = "../src/mechanics.rs"]
 mod mechanics;
+#[path = "../src/optimizer.rs"]
+mod optimizer;
 #[path = "../src/combat.rs"]
 mod combat;
 #[path = "../src/triggers.rs"]

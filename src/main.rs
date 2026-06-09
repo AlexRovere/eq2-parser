@@ -6,6 +6,7 @@ mod config;
 mod export;
 mod history;
 mod mechanics;
+mod optimizer;
 mod parser;
 mod tailer;
 mod template;

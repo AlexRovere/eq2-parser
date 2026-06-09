@@ -75,6 +75,7 @@ enum Tab {
     Encounters,
     Triggers,
     Mechanics,
+    Optimizer,
     Settings,
 }
 
@@ -197,6 +198,18 @@ pub struct App {
     filter_mech: String,
     /// Dernière sauvegarde de la base de mécaniques apprise.
     last_mech_save: Instant,
+    /// Base de sorts bundlée (cast/recast/type) pour l'optimisation.
+    spell_db: crate::optimizer::SpellDb,
+    /// Personnage sélectionné dans l'onglet Optimisation (auto = perso suivi).
+    opt_char: Option<String>,
+    /// Classe sélectionnée dans l'onglet Optimisation (pour la planif hors combat).
+    opt_class: Option<String>,
+    /// Dernier perso vu dans l'onglet Optimisation (re-détecte la classe au changement).
+    opt_char_prev: Option<String>,
+    /// Overlays en cours de déplacement : on n'impose pas la position pendant le
+    /// drag (sinon ça se bat avec l'OS et l'overlay tremble).
+    overlay_dragging: bool,
+    mech_dragging: bool,
 }
 
 /// Changelog embarqué dans l'exécutable (mis à jour à chaque release).
@@ -210,7 +223,8 @@ impl App {
         let mut config = Config::load();
         apply_theme(&cc.egui_ctx, config.light_mode);
         let trigger_engine = TriggerEngine::new(&config.triggers);
-        let engine = CombatEngine::new(config.encounter_timeout);
+        let mut engine = CombatEngine::new(config.encounter_timeout);
+        engine.anchor = config.encounter_anchor;
         // Premier lancement / mauvais chemin : détecte le répertoire EQ2.
         let mut available_logs = discover_logs(&config.logs_dir);
         if available_logs.is_empty() {
@@ -270,6 +284,12 @@ impl App {
             mech_warned: HashMap::new(),
             filter_mech: String::new(),
             last_mech_save: Instant::now(),
+            spell_db: crate::optimizer::SpellDb::bundled(),
+            opt_char: None,
+            opt_class: None,
+            opt_char_prev: None,
+            overlay_dragging: false,
+            mech_dragging: false,
         };
         // Attache automatique : le log le plus récemment écrit (perso actif),
         // sinon le dernier log suivi.
@@ -306,6 +326,7 @@ impl App {
         ));
         self.rx = Some(rx);
         self.engine = CombatEngine::new(self.config.encounter_timeout);
+        self.engine.anchor = self.config.encounter_anchor;
         self.engine.self_name = name.clone();
         // Recharge l'historique persisté de ce personnage.
         if self.config.persist_history {
@@ -313,6 +334,22 @@ impl App {
         }
         self.current_server = server;
         self.last_hist_len = self.engine.history.len();
+        // Détection auto de la classe du perso à l'attache, depuis l'historique
+        // chargé (sorts qu'il a lancés), si pas déjà connue.
+        if !self.config.char_class.contains_key(&name) {
+            let mut abilities: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for enc in &self.engine.history {
+                if let Some(c) = enc.combatants.get(&name) {
+                    abilities.extend(c.abilities.keys().cloned());
+                }
+            }
+            if let Some(cls) = self.spell_db.infer_class(abilities.iter()) {
+                self.config.char_class.insert(name.clone(), cls);
+            }
+        }
+        // Le perso a changé : l'onglet Optimisation re-sélectionne sa classe.
+        self.opt_char = None;
+        self.opt_class = None;
         self.lines_seen = 0;
         self.selected_encounter = None;
         self.selected_combatant = None;
@@ -873,6 +910,9 @@ impl eframe::App for App {
                 self.tab = Tab::Mechanics;
             }
             if i.consume_key(Modifiers::CTRL, Key::Num5) {
+                self.tab = Tab::Optimizer;
+            }
+            if i.consume_key(Modifiers::CTRL, Key::Num6) {
                 self.tab = Tab::Settings;
             }
             if i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -942,6 +982,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Encounters, "📜 Encounters");
                 ui.selectable_value(&mut self.tab, Tab::Triggers, "🔔 Triggers");
                 ui.selectable_value(&mut self.tab, Tab::Mechanics, "⏱ Mécaniques");
+                ui.selectable_value(&mut self.tab, Tab::Optimizer, "🎯 Optimisation");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "⚙ Settings");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Bascule de thème clair/sombre.
@@ -1022,6 +1063,7 @@ impl eframe::App for App {
             Tab::Encounters => self.ui_encounters(ui),
             Tab::Triggers => self.ui_triggers(ui),
             Tab::Mechanics => self.ui_mechanics(ui),
+            Tab::Optimizer => self.ui_optimizer(ui),
             Tab::Settings => self.ui_settings(ui, ctx),
         });
 
@@ -1032,6 +1074,9 @@ impl eframe::App for App {
             self.show_overlay(ctx);
         } else {
             self.passthrough_sent = false;
+        }
+        if self.config.mech_overlay_window && self.config.mechanics_enabled {
+            self.show_mech_overlay(ctx);
         }
 
         // Export PNG du graphe : screenshot du viewport puis recadrage.
@@ -1544,6 +1589,654 @@ impl App {
         }
     }
 
+    fn ui_optimizer(&mut self, ui: &mut egui::Ui) {
+        use crate::optimizer::{report, Scenario};
+
+        // --- Personnage (optionnel) : auto sur le perso suivi ---
+        // On inclut le perso suivi même sans combat encore mesuré, pour afficher
+        // sa classe (détectée à l'attache) et ses sorts dès l'ouverture.
+        let mut chars = self.engine.prof.known_chars();
+        let me = self.engine.self_name.clone();
+        if !me.is_empty() && !chars.contains(&me) {
+            chars.push(me);
+            chars.sort();
+        }
+        if self
+            .opt_char
+            .as_ref()
+            .is_some_and(|c| !chars.contains(c))
+        {
+            self.opt_char = None;
+        }
+        if self.opt_char.is_none() {
+            self.opt_char = chars
+                .iter()
+                .find(|c| **c == self.engine.self_name)
+                .or_else(|| chars.first())
+                .cloned();
+        }
+        let char_opt = self.opt_char.clone();
+
+        // Données mesurées (vide si pas de combat) + classe devinée.
+        let obs = char_opt
+            .as_ref()
+            .map(|c| self.engine.prof.live(c))
+            .unwrap_or_default();
+        let class_hint = self.spell_db.infer_class(obs.keys());
+        // Classe : re-détectée à chaque changement de perso (suit le perso), tout
+        // en laissant un choix manuel persister tant qu'on ne change pas de perso.
+        let char_changed = self.opt_char_prev != char_opt;
+        self.opt_char_prev = char_opt.clone();
+        // Mémorise la classe devinée pour ce perso (persistée) : on la retrouve
+        // ensuite même sans combat dans la session courante.
+        if let (Some(c), Some(h)) = (&char_opt, &class_hint) {
+            if self.config.char_class.get(c) != Some(h) {
+                self.config.char_class.insert(c.clone(), h.clone());
+                self.config.save();
+            }
+        }
+        // Classe par défaut = celle stockée pour ce perso, sinon devinée.
+        let stored = char_opt
+            .as_ref()
+            .and_then(|c| self.config.char_class.get(c).cloned());
+        if char_changed && char_opt.is_some() {
+            if let Some(cl) = stored.clone().or_else(|| class_hint.clone()) {
+                self.opt_class = Some(cl);
+            }
+        }
+        if self.opt_class.is_none() {
+            self.opt_class = stored.or_else(|| class_hint.clone());
+        }
+        let classes = self.spell_db.classes();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("🎯 Optimisation");
+            ui.separator();
+            ui.label("Perso :");
+            let char_label = char_opt.clone().unwrap_or_else(|| "— aucun —".into());
+            egui::ComboBox::from_id_salt("opt_char")
+                .selected_text(char_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.opt_char, None, "— aucun —");
+                    for c in &chars {
+                        ui.selectable_value(&mut self.opt_char, Some(c.clone()), c);
+                    }
+                });
+            ui.separator();
+            ui.label("Classe :");
+            let class_label = self
+                .opt_class
+                .clone()
+                .unwrap_or_else(|| "— choisir —".into());
+            egui::ComboBox::from_id_salt("opt_class")
+                .selected_text(class_label)
+                .show_ui(ui, |ui| {
+                    for c in &classes {
+                        ui.selectable_value(&mut self.opt_class, Some(c.clone()), c);
+                    }
+                });
+        });
+        let class = self.opt_class.clone();
+
+        // --- Stats joueur (par perso, ou par classe en mode planif) ---
+        let stats_key = char_opt
+            .clone()
+            .unwrap_or_else(|| format!("class:{}", class.as_deref().unwrap_or("?")));
+        let mut stats = self
+            .config
+            .player_stats
+            .get(&stats_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut stats_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Casting speed %");
+            stats_changed |= ui
+                .add(egui::DragValue::new(&mut stats.casting_speed).range(0.0..=200.0).speed(1.0))
+                .on_hover_text("Bonus de vitesse d'incantation (réduit le temps de cast).")
+                .changed();
+            ui.separator();
+            ui.label("Reuse %");
+            stats_changed |= ui
+                .add(egui::DragValue::new(&mut stats.reuse_speed).range(0.0..=200.0).speed(1.0))
+                .on_hover_text("Bonus de réutilisation (réduit les recasts).")
+                .changed();
+            ui.separator();
+            ui.label("Recovery s");
+            stats_changed |= ui
+                .add(egui::DragValue::new(&mut stats.recovery).range(0.0..=2.0).speed(0.05))
+                .on_hover_text("Temps de récupération ajouté après le cast.")
+                .changed();
+        });
+        if stats_changed {
+            self.config.player_stats.insert(stats_key, stats.clone());
+            self.config.save();
+        }
+
+        // --- Scénario (filtres) ---
+        let mut scenario_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Scénario :");
+            if ui.button("Mono").clicked() {
+                self.config.opt_targets = 1;
+                scenario_changed = true;
+            }
+            ui.label("cibles");
+            scenario_changed |= ui
+                .add(egui::DragValue::new(&mut self.config.opt_targets).range(1..=24))
+                .changed();
+            ui.separator();
+            scenario_changed |= ui
+                .checkbox(&mut self.config.opt_linked, "cibles liées")
+                .on_hover_text(
+                    "Cibles d'un même encounter (liées) : les sorts AE (vert) touchent tout le \
+                     groupe. Décoché : les AE ne touchent qu'une cible. Les AoE (bleu, zone) \
+                     touchent toujours tout, lié ou non.",
+                )
+                .changed();
+            ui.separator();
+            scenario_changed |= ui
+                .checkbox(&mut self.config.opt_hide_unknown, "masquer hors-base")
+                .on_hover_text(
+                    "Masquer les sorts absents de la base (procs, pets, sorts récents au cast \
+                     inféré). Par défaut tout ce que tu as lancé est affiché.",
+                )
+                .changed();
+        });
+        if scenario_changed {
+            self.config.save();
+        }
+        ui.label(
+            RichText::new(
+                "Dégâts auto depuis tes logs (bleu), sinon saisis-les à la main (tooltip). \
+                 Clique un en-tête pour trier, survole-le pour l'aide.",
+            )
+            .weak()
+            .size(12.0),
+        );
+        // Légende : rôles (quoi faire) + couleurs de type.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Rôles :").weak().size(12.0));
+            ui.label(RichText::new("🔁 entretenir (DoT)").color(Color32::from_rgb(46, 204, 113)).size(12.0));
+            ui.label(RichText::new("⏳ cooldown").color(Color32::from_rgb(230, 126, 34)).size(12.0));
+            ui.label(RichText::new("▶ filler").color(Color32::from_rgb(150, 160, 175)).size(12.0));
+            ui.separator();
+            ui.label(RichText::new("Type :").weak().size(12.0));
+            ui.label(RichText::new("● mono").color(Color32::from_rgb(231, 76, 60)).size(12.0));
+            ui.label(RichText::new("● AoE zone").color(Color32::from_rgb(52, 152, 219)).size(12.0));
+            ui.label(RichText::new("● AE lié").color(Color32::from_rgb(46, 204, 113)).size(12.0));
+            ui.separator();
+            ui.label(RichText::new("orange = saisi/CD").color(Color32::from_rgb(230, 126, 34)).size(12.0));
+        });
+
+        if class.is_none() && obs.is_empty() {
+            ui.separator();
+            ui.label(
+                RichText::new(
+                    "Choisis ta classe pour afficher ses sorts (et saisir les dégâts), ou lance \
+                     un combat pour un remplissage automatique.",
+                )
+                .weak(),
+            );
+            return;
+        }
+
+        // --- Tableau ---
+        let sc = Scenario {
+            targets: self.config.opt_targets,
+            linked: self.config.opt_linked,
+        };
+        let mut rows = report(
+            &obs,
+            &self.spell_db,
+            class_hint.as_deref().or(class.as_deref()),
+            &stats,
+            &sc,
+            &self.config.cast_overrides,
+            &self.config.spell_damage,
+            class.as_deref(),
+            true,
+        );
+        // On affiche par défaut tout ce que le joueur a lancé (y compris les
+        // sorts hors-base) ; « masquer hors-base » ne garde que les reconnus.
+        if self.config.opt_hide_unknown {
+            rows.retain(|r| r.from_db || self.config.cast_overrides.contains_key(&r.ability));
+        }
+        if rows.is_empty() {
+            ui.separator();
+            ui.label(RichText::new("Aucun sort à afficher.").weak());
+            return;
+        }
+
+        // Tri : colonne choisie, sorts masqués toujours en bas.
+        let key = self.config.opt_sort_key.clone();
+        let desc = self.config.opt_sort_desc;
+        let val = |r: &crate::optimizer::SpellRow| -> f64 {
+            match key.as_str() {
+                "dmg" => r.dmg_per_cast,
+                "crit" => r.crit_rate,
+                "targets" => r.avg_targets,
+                "cast" => r.cast_eff as f64,
+                "recast" => r.recast_eff.unwrap_or(0.0) as f64,
+                "sustained" => r.sustained_dps,
+                _ => r.efficiency,
+            }
+        };
+        {
+            let hidden = &self.config.opt_hidden;
+            rows.sort_by(|a, b| {
+                hidden
+                    .contains(&a.ability)
+                    .cmp(&hidden.contains(&b.ability))
+                    .then_with(|| {
+                        let o = val(a).total_cmp(&val(b));
+                        if desc { o.reverse() } else { o }
+                    })
+                    .then_with(|| a.ability.cmp(&b.ability))
+            });
+        }
+        // Maxima (sorts visibles) pour l'échelle des barres.
+        let max_eff = rows
+            .iter()
+            .filter(|r| !self.config.opt_hidden.contains(&r.ability))
+            .map(|r| r.efficiency)
+            .fold(0.0_f64, f64::max);
+        let max_sus = rows
+            .iter()
+            .filter(|r| !self.config.opt_hidden.contains(&r.ability))
+            .map(|r| r.sustained_dps)
+            .fold(0.0_f64, f64::max);
+        let sort_eff = key == "eff";
+        let sort_sus = key == "sustained";
+
+        // --- Diagnostic de rotation (sur les sorts mesurés) ---
+        if let Some(c) = &char_opt {
+            let ct = self.engine.prof.combat_time(c) as f64;
+            let diag = crate::optimizer::diagnose(&rows, ct);
+            if diag.total_casts > 0 {
+                egui::CollapsingHeader::new("📊 Diagnostic de rotation")
+                    .id_salt("opt_diag")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let mins = diag.combat_time as u64 / 60;
+                        let secs = diag.combat_time as u64 % 60;
+                        ui.label(format!(
+                            "Combat analysé : {mins}:{secs:02} · {} casts · ~{:.0}s à caster",
+                            diag.total_casts, diag.cast_time
+                        ));
+                        ui.add(
+                            egui::ProgressBar::new(diag.gcd_util as f32)
+                                .desired_width(260.0)
+                                .text(format!(
+                                    "Activité GCD {:.0}% · temps mort {:.0}%",
+                                    diag.gcd_util * 100.0,
+                                    (1.0 - diag.gcd_util) * 100.0
+                                )),
+                        )
+                        .on_hover_text(
+                            "Part du combat réellement passée à caster. Le reste = temps mort \
+                             (déplacements, attente, GCD perdus).",
+                        );
+                        if diag.low_yield_frac > 0.0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.0}% de ton temps de cast sur des sorts à faible rendement.",
+                                    diag.low_yield_frac * 100.0
+                                ))
+                                .color(Color32::from_rgb(230, 180, 60)),
+                            );
+                        }
+                        if !diag.underused.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("À mieux entretenir (DoT / cooldowns) :").strong(),
+                            );
+                            for u in &diag.underused {
+                                ui.label(format!(
+                                    "• {} : entretien ~{:.0}% ({} cast(s) / ~{:.0}) → ~{} dégâts \
+                                     en plus si maintenu",
+                                    u.ability,
+                                    u.uptime * 100.0,
+                                    u.casts,
+                                    u.expected,
+                                    fmt_f64(u.lost_damage)
+                                ));
+                            }
+                        }
+                    });
+                ui.separator();
+            }
+        }
+
+        // Réinitialiser les surcharges manuelles des sorts affichés.
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("↺ Réinit. surcharges")
+                .on_hover_text("Efface les cast/dégâts saisis à la main pour les sorts affichés.")
+                .clicked()
+            {
+                for r in &rows {
+                    self.config.cast_overrides.remove(&r.ability);
+                    self.config.spell_damage.remove(&r.ability);
+                }
+                self.config.save();
+            }
+        });
+        ui.separator();
+
+        let mut to_save = false;
+        let mut new_sort: Option<&str> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("opt_scroll")
+            .show(ui, |ui| {
+                egui::Grid::new("opt_table")
+                    .num_columns(11)
+                    .striped(true)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        // En-têtes (cliquables = triables, survol = aide).
+                        let headers: [(&str, Option<&str>, &str); 11] = [
+                            ("", None, "Masquer (renvoie en bas de la liste)."),
+                            ("Sort", None, ""),
+                            (
+                                "Rôle",
+                                None,
+                                "Comment l'utiliser : 🔁 Entretenir (DoT), ⏳ Cooldown (presser \
+                                 dès dispo), ▶ Filler (sur un GCD libre).",
+                            ),
+                            (
+                                "Type",
+                                None,
+                                "Forme des dégâts : mono (rouge), AoE zone (bleu, touche tout), \
+                                 AE encounter (vert, mobs liés).",
+                            ),
+                            ("Dég/cast", Some("dmg"), "Dégâts par cast (mesurés en bleu, ou saisis)."),
+                            ("% crit", Some("crit"), "Taux de critique observé."),
+                            ("Cibles", Some("targets"), "Cibles moyennes touchées par cast."),
+                            (
+                                "Cast",
+                                Some("cast"),
+                                "Temps de cast de base (éditable). GCD = cast effectif + recovery.",
+                            ),
+                            ("Recast", Some("recast"), "Cooldown effectif. ⟳ orange = cooldown long."),
+                            (
+                                "Eff/GCD",
+                                Some("eff"),
+                                "Valeur d'un cast sur un GCD libre = dégâts / (cast + recovery). \
+                                 Sert de priorité : « je lance quoi maintenant ? ».",
+                            ),
+                            (
+                                "DPS soutenu",
+                                Some("sustained"),
+                                "Contribution réelle dans la durée = dégâts / intervalle utile \
+                                 (reuse et durée du DoT inclus).",
+                            ),
+                        ];
+                        for (label, k, tip) in headers {
+                            match k {
+                                Some(k) => {
+                                    let arrow = if key == k {
+                                        if desc { " ▼" } else { " ▲" }
+                                    } else {
+                                        ""
+                                    };
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(format!("{label}{arrow}")).strong(),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text(tip);
+                                    if resp.clicked() {
+                                        new_sort = Some(k);
+                                    }
+                                }
+                                None => {
+                                    let l = ui.label(RichText::new(label).strong());
+                                    if !tip.is_empty() {
+                                        l.on_hover_text(tip);
+                                    }
+                                }
+                            }
+                        }
+                        ui.end_row();
+
+                        // Barre + valeur dans une cellule de largeur fixe.
+                        let bar_cell =
+                            |ui: &mut egui::Ui, v: f64, maxv: f64, active: bool, dim: bool| {
+                                let h = ui.spacing().interact_size.y;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(94.0, h),
+                                    egui::Sense::hover(),
+                                );
+                                if v <= 0.0 {
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(4.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        "-",
+                                        egui::FontId::proportional(13.0),
+                                        ui.visuals().weak_text_color(),
+                                    );
+                                    return;
+                                }
+                                let frac = if maxv > 0.0 {
+                                    (v / maxv).clamp(0.0, 1.0) as f32
+                                } else {
+                                    0.0
+                                };
+                                let base = if active {
+                                    Color32::from_rgb(46, 204, 113)
+                                } else {
+                                    Color32::from_rgb(120, 130, 150)
+                                };
+                                let bar = if dim { base.gamma_multiply(0.4) } else { base };
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        rect.min,
+                                        egui::vec2(rect.width() * frac, rect.height()),
+                                    ),
+                                    2.0,
+                                    bar.gamma_multiply(0.30),
+                                );
+                                let txt = if active {
+                                    base
+                                } else if dim {
+                                    ui.visuals().weak_text_color()
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                ui.painter().text(
+                                    rect.left_center() + egui::vec2(4.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    fmt_f64(v),
+                                    egui::FontId::proportional(13.0),
+                                    txt,
+                                );
+                            };
+
+                        for r in &rows {
+                            // Case masquer (envoie en bas + grise).
+                            let mut hidden = self.config.opt_hidden.contains(&r.ability);
+                            if ui
+                                .checkbox(&mut hidden, "")
+                                .on_hover_text("Masquer ce sort (le renvoie en bas, grisé).")
+                                .changed()
+                            {
+                                if hidden {
+                                    self.config.opt_hidden.insert(r.ability.clone());
+                                } else {
+                                    self.config.opt_hidden.remove(&r.ability);
+                                }
+                                to_save = true;
+                            }
+                            let dim = hidden;
+
+                            let hover = if r.observed {
+                                format!(
+                                    "Mesuré : {} cast(s) · {} de dégâts totaux\n\
+                                     Dégâts/cast au scénario : {}\nCast effectif : {:.2} s",
+                                    r.casts,
+                                    fmt_f64(r.total_damage as f64),
+                                    fmt_f64(r.scenario_dmg),
+                                    r.cast_eff,
+                                )
+                            } else {
+                                "Pas encore vu en combat : saisis les dégâts du tooltip dans la \
+                                 colonne Dég/cast."
+                                    .to_string()
+                            };
+                            let hover = format!(
+                                "{hover}\nIntervalle utile : {:.1} s{}",
+                                r.interval,
+                                if r.is_dot { " (DoT à entretenir)" } else { "" },
+                            );
+                            let name = if dim {
+                                RichText::new(&r.ability).weak()
+                            } else {
+                                RichText::new(&r.ability).strong()
+                            };
+                            ui.label(name).on_hover_text(hover);
+
+                            // Rôle : comment utiliser le sort (la vraie info actionnable).
+                            let (role_icon, role_col, role_hover) = if r.is_dot {
+                                (
+                                    "🔁",
+                                    Color32::from_rgb(46, 204, 113),
+                                    "Entretenir : applique le DoT et laisse-le tiquer ; rafraîchis \
+                                     avant qu'il tombe.",
+                                )
+                            } else if r.long_cd {
+                                (
+                                    "⏳",
+                                    Color32::from_rgb(230, 126, 34),
+                                    "Cooldown : gros sort à presser dès qu'il est disponible.",
+                                )
+                            } else {
+                                (
+                                    "▶",
+                                    Color32::from_rgb(150, 160, 175),
+                                    "Filler : à lancer sur un GCD libre quand rien de prioritaire.",
+                                )
+                            };
+                            let role_col = if dim { role_col.gamma_multiply(0.5) } else { role_col };
+                            ui.label(RichText::new(role_icon).color(role_col))
+                                .on_hover_text(role_hover);
+
+                            // Type coloré : mono = rouge, AoE (zone) = bleu, AE = vert.
+                            let type_col = if r.kind.contains("AoE") {
+                                Color32::from_rgb(52, 152, 219)
+                            } else if r.kind.contains("AE") {
+                                Color32::from_rgb(46, 204, 113)
+                            } else {
+                                Color32::from_rgb(231, 76, 60)
+                            };
+                            let type_col = if dim { type_col.gamma_multiply(0.5) } else { type_col };
+                            ui.label(RichText::new(r.kind).color(type_col));
+
+                            // Dégâts : mesurés (auto, bleu) ou éditables (saisie manuelle).
+                            if r.observed {
+                                ui.label(
+                                    RichText::new(fmt_f64(r.dmg_per_cast))
+                                        .color(Color32::from_rgb(52, 152, 219)),
+                                )
+                                .on_hover_text("Mesuré dans les logs");
+                            } else {
+                                let overridden = self.config.spell_damage.contains_key(&r.ability);
+                                let mut d = r.dmg_per_cast;
+                                let resp = ui
+                                    .scope(|ui| {
+                                        if overridden {
+                                            ui.visuals_mut().override_text_color =
+                                                Some(Color32::from_rgb(230, 126, 34));
+                                        }
+                                        ui.add(
+                                            egui::DragValue::new(&mut d)
+                                                .range(0.0..=1.0e9)
+                                                .speed(100.0),
+                                        )
+                                    })
+                                    .inner;
+                                if resp.changed() {
+                                    if d > 0.0 {
+                                        self.config.spell_damage.insert(r.ability.clone(), d);
+                                    } else {
+                                        self.config.spell_damage.remove(&r.ability);
+                                    }
+                                    to_save = true;
+                                }
+                            }
+
+                            if r.observed {
+                                ui.label(format!("{:.0}%", r.crit_rate));
+                                ui.label(format!("{:.1}", r.avg_targets));
+                            } else {
+                                ui.label("-");
+                                ui.label("-");
+                            }
+
+                            // Cast de base éditable (surcharge manuelle, orange si surchargé).
+                            let cast_over = self.config.cast_overrides.contains_key(&r.ability);
+                            let mut base = r.base_cast;
+                            let resp = ui
+                                .scope(|ui| {
+                                    if cast_over {
+                                        ui.visuals_mut().override_text_color =
+                                            Some(Color32::from_rgb(230, 126, 34));
+                                    }
+                                    ui.add(
+                                        egui::DragValue::new(&mut base)
+                                            .range(0.0..=15.0)
+                                            .speed(0.1)
+                                            .suffix(if r.from_db { "" } else { " ?" }),
+                                    )
+                                })
+                                .inner;
+                            if resp.changed() {
+                                self.config.cast_overrides.insert(r.ability.clone(), base);
+                                to_save = true;
+                            }
+
+                            // Recast : orange si cooldown long.
+                            match r.recast_eff {
+                                Some(rc) if r.long_cd => {
+                                    ui.label(
+                                        RichText::new(format!("⟳ {rc:.0}"))
+                                            .color(Color32::from_rgb(230, 126, 34)),
+                                    )
+                                    .on_hover_text("Cooldown long : à lancer dès qu'il est dispo.");
+                                }
+                                Some(rc) => {
+                                    ui.label(format!("{rc:.0}"));
+                                }
+                                None => {
+                                    ui.label("-");
+                                }
+                            };
+
+                            // Barres Eff/GCD et DPS soutenu (la colonne triée en vert).
+                            bar_cell(ui, r.efficiency, max_eff, sort_eff, dim);
+                            bar_cell(ui, r.sustained_dps, max_sus, sort_sus, dim);
+                            ui.end_row();
+                        }
+                    });
+            });
+
+        // Application du tri choisi par clic d'en-tête.
+        if let Some(k) = new_sort {
+            if self.config.opt_sort_key == k {
+                self.config.opt_sort_desc = !self.config.opt_sort_desc;
+            } else {
+                self.config.opt_sort_key = k.to_string();
+                self.config.opt_sort_desc = true;
+            }
+            to_save = true;
+        }
+        if to_save {
+            self.config.save();
+        }
+    }
+
     fn ui_mechanics(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("mech_scroll")
@@ -1565,7 +2258,21 @@ impl App {
                     }
                     ui.separator();
                     if ui
-                        .checkbox(&mut self.config.mech_overlay, "Décompte dans l'overlay")
+                        .checkbox(&mut self.config.mech_overlay, "Décompte dans l'overlay DPS")
+                        .changed()
+                    {
+                        self.config.save();
+                    }
+                    ui.separator();
+                    if ui
+                        .checkbox(
+                            &mut self.config.mech_overlay_window,
+                            "Overlay mécaniques dédié",
+                        )
+                        .on_hover_text(
+                            "Fenêtre overlay séparée (déplaçable, always-on-top) listant les \
+                             prochaines mécaniques de boss en compte à rebours.",
+                        )
                         .changed()
                     {
                         self.config.save();
@@ -1678,6 +2385,28 @@ impl App {
                         {
                             self.engine.mech.db.save_to(&p);
                         }
+                    }
+                    if ui
+                        .button("🧹 Nettoyer")
+                        .on_hover_text(
+                            "Supprime les mécaniques apprises de mobs non-boss (trash : \
+                             « a golem », etc.). Ne touche ni aux manuelles ni aux bundlées.",
+                        )
+                        .clicked()
+                    {
+                        let before = self.engine.mech.db.entries.len();
+                        self.engine.mech.db.entries.retain(|e| {
+                            !(matches!(e.source, MechSource::Learned)
+                                && !crate::mechanics::is_named_mob(&e.mob))
+                        });
+                        let removed = before - self.engine.mech.db.entries.len();
+                        if removed > 0 {
+                            do_save = true;
+                        }
+                        self.trigger_engine.toasts.push(crate::triggers::Toast {
+                            text: format!("{removed} mécanique(s) trash supprimée(s)"),
+                            created: Instant::now(),
+                        });
                     }
                     if ui
                         .button("🗡 Pack ACT")
@@ -1846,6 +2575,87 @@ impl App {
         section(ui, "🐾 Pets", false, |ui| self.settings_pets(ui));
         section(ui, "🎨 Overlay", false, |ui| self.settings_overlay(ui));
         section(ui, "🔄 Mises à jour", false, |ui| self.settings_updates(ui));
+        #[cfg(debug_assertions)]
+        section(ui, "🧪 Debug (tests)", true, |ui| self.settings_debug(ui));
+    }
+
+    #[cfg(debug_assertions)]
+    fn settings_debug(&mut self, ui: &mut egui::Ui) {
+        use crate::mechanics::MechKind;
+        let now = Self::now_epoch();
+        ui.label(
+            RichText::new(
+                "Injecte des mécaniques de test récurrentes (visibles dans l'onglet Mécaniques, \
+                 l'overlay dédié, et déclenchent les alertes selon ton réglage).",
+            )
+            .weak()
+            .size(12.0),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("+ AoE 15s").clicked() {
+                self.engine.mech.debug_add("Test AoE", MechKind::Aoe, 15.0, now);
+            }
+            if ui.button("+ Tank buster 25s").clicked() {
+                self.engine
+                    .mech
+                    .debug_add("Test Tank Buster", MechKind::TankBuster, 25.0, now);
+            }
+            if ui.button("+ Mortel 40s").clicked() {
+                self.engine
+                    .mech
+                    .debug_add("Test Mortel", MechKind::Lethal, 40.0, now);
+            }
+            if ui.button("+ Burst 12s").clicked() {
+                self.engine
+                    .mech
+                    .debug_add("Test Burst", MechKind::Burst, 12.0, now);
+            }
+            if ui.button("🧹 Clear").clicked() {
+                self.engine.mech.debug_clear();
+            }
+        });
+        ui.separator();
+        if ui
+            .button("⚔ Combat de test")
+            .on_hover_text(
+                "Injecte un encounter factice (toi + un allié + un boss) pour tester l'overlay \
+                 DPS, les classements et le graphe.",
+            )
+            .clicked()
+        {
+            self.debug_fake_combat();
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_fake_combat(&mut self) {
+        let name = if self.engine.self_name.is_empty() {
+            "Testeur".to_string()
+        } else {
+            self.engine.self_name.clone()
+        };
+        self.engine.self_name = name.clone();
+        let parser = crate::parser::Parser::new(name.clone());
+        let now = Self::now_epoch();
+        let date = "Tue May 26 17:42:26 2026";
+        for k in 0..20u64 {
+            let t = now.saturating_sub(20) + k;
+            for l in [
+                format!(
+                    "({t})[{date}] YOU hit Boss de test for {} crushing damage.",
+                    4000 + k * 50
+                ),
+                format!(
+                    "({t})[{date}] Allié's Flamboiement hits Boss de test for {} heat damage.",
+                    3000 + k * 30
+                ),
+                format!("({t})[{date}] Boss de test hits {name} for 1500 crushing damage."),
+            ] {
+                if let Some(p) = parser.parse_line(&l) {
+                    self.engine.process(&p);
+                }
+            }
+        }
     }
 
     fn settings_log(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1948,6 +2758,21 @@ impl App {
             .changed()
         {
             self.engine.timeout = self.config.encounter_timeout;
+            self.config.save();
+        }
+        if ui
+            .checkbox(
+                &mut self.config.encounter_anchor,
+                "Clore sur mon activité (ignorer les combats voisins)",
+            )
+            .on_hover_text(
+                "Le combat se clôt quand toi/ton groupe arrêtez, même si des joueurs hors \
+                 groupe ou des PNJ se battent à côté. Désactive pour suivre tout le combat \
+                 de la zone.",
+            )
+            .changed()
+        {
+            self.engine.anchor = self.config.encounter_anchor;
             self.config.save();
         }
         if ui
@@ -3464,6 +4289,151 @@ struct OverlaySection {
 }
 
 impl App {
+    /// Overlay dédié aux mécaniques de boss : fenêtre séparée, always-on-top,
+    /// listant les prochains casts chronométrés en barres de compte à rebours.
+    fn show_mech_overlay(&mut self, ctx: &egui::Context) {
+        let id = egui::ViewportId::from_hash_of("eq2_mech_overlay");
+        let now = Self::now_epoch();
+        let bars: Vec<(String, f32, f64, bool)> = self
+            .engine
+            .mech
+            .predictions(now)
+            .into_iter()
+            .filter(|p| p.eta <= 60.0)
+            .take(8)
+            .map(|p| {
+                let frac = (p.eta / p.period.max(1.0)).clamp(0.0, 1.0) as f32;
+                (
+                    format!("{} {}", p.kind.icon(), p.ability),
+                    frac,
+                    p.eta.max(0.0),
+                    p.eta <= p.lead as f64,
+                )
+            })
+            .collect();
+
+        let was_dragging = self.mech_dragging;
+        let cfg = &mut self.config;
+        let s = cfg.overlay_scale.clamp(0.6, 2.5);
+        let bg = Color32::from_rgba_unmultiplied(
+            cfg.overlay_bg[0],
+            cfg.overlay_bg[1],
+            cfg.overlay_bg[2],
+            (cfg.overlay_opacity * 235.0) as u8,
+        );
+        let mut changed = false;
+        let mut drag_now = false;
+
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("EQ2 Mécaniques")
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_resizable(true)
+            .with_min_inner_size([160.0, 50.0])
+            .with_inner_size([cfg.mech_overlay_width, cfg.mech_overlay_height]);
+        // Pendant le déplacement, l'OS pilote la position : ne pas la réimposer.
+        if !was_dragging {
+            if let Some((x, y)) = cfg.mech_overlay_pos {
+                builder = builder.with_position([x, y]);
+            }
+        }
+
+        ctx.show_viewport_immediate(id, builder, |ctx, _class| {
+            let actual = ctx.input(|i| i.screen_rect().size());
+            if (actual.x - cfg.mech_overlay_width).abs() > 1.0
+                || (actual.y - cfg.mech_overlay_height).abs() > 1.0
+            {
+                cfg.mech_overlay_width = actual.x;
+                cfg.mech_overlay_height = actual.y;
+                changed = true;
+            }
+            if !was_dragging {
+                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    let pos = (rect.min.x, rect.min.y);
+                    if cfg
+                        .mech_overlay_pos
+                        .is_none_or(|p| (p.0 - pos.0).abs() > 1.0 || (p.1 - pos.1).abs() > 1.0)
+                    {
+                        cfg.mech_overlay_pos = Some(pos);
+                        changed = true;
+                    }
+                }
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let frame = egui::Frame::new().fill(bg).corner_radius(8.0).inner_margin(8.0);
+                    frame.show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let resp = ui
+                            .horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("⏱ Mécaniques")
+                                        .size(11.0 * s)
+                                        .color(Color32::WHITE),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("✖")
+                                                        .size(11.0 * s)
+                                                        .color(Color32::from_rgb(231, 76, 60)),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Masquer (réactivable dans Settings)")
+                                            .clicked()
+                                        {
+                                            cfg.mech_overlay_window = false;
+                                            changed = true;
+                                        }
+                                    },
+                                );
+                            })
+                            .response;
+                        let mut drag_rect = resp.rect.expand2(egui::vec2(0.0, 4.0));
+                        drag_rect.max.x -= 26.0 * s;
+                        let interact = ui.interact(
+                            drag_rect,
+                            ui.id().with("mech_drag"),
+                            egui::Sense::click_and_drag(),
+                        );
+                        if interact.dragged() {
+                            drag_now = true;
+                            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::StartDrag);
+                        }
+                        ui.separator();
+                        if bars.is_empty() {
+                            ui.label(
+                                RichText::new("Aucune mécanique chronométrée en cours.")
+                                    .size(10.0 * s)
+                                    .weak(),
+                            );
+                        } else {
+                            for (label, frac, eta, urgent) in &bars {
+                                let col = if *urgent {
+                                    Color32::from_rgb(231, 76, 60)
+                                } else {
+                                    Color32::from_rgb(46, 204, 113)
+                                };
+                                bar_row(ui, label, &format!("{eta:.0} s"), *frac, col, Color32::WHITE, s);
+                            }
+                        }
+                    });
+                });
+        });
+
+        if changed {
+            cfg.save();
+        }
+        self.mech_dragging = drag_now;
+    }
+
     fn show_overlay(&mut self, ctx: &egui::Context) {
         let overlay_id = egui::ViewportId::from_hash_of("eq2_overlay");
 
@@ -3511,6 +4481,7 @@ impl App {
                 Vec::new()
             };
         let need_passthrough_cmd = !self.passthrough_sent;
+        let was_dragging = self.overlay_dragging;
 
         let cfg = &mut self.config;
         let s = cfg.overlay_scale.clamp(0.6, 2.5);
@@ -3678,6 +4649,7 @@ impl App {
 
         let mut changed = false;
         let mut passthrough_toggled = false;
+        let mut drag_now = false;
 
         let mut builder = egui::ViewportBuilder::default()
             .with_title("EQ2 Overlay")
@@ -3688,8 +4660,12 @@ impl App {
             .with_resizable(true)
             .with_min_inner_size([180.0, 60.0])
             .with_inner_size([cfg.overlay_width, cfg.overlay_height]);
-        if let Some((x, y)) = cfg.overlay_pos {
-            builder = builder.with_position([x, y]);
+        // Pendant le déplacement, l'OS pilote la position : ne pas la réimposer
+        // (sinon l'overlay tremble en se battant avec le drag).
+        if !was_dragging {
+            if let Some((x, y)) = cfg.overlay_pos {
+                builder = builder.with_position([x, y]);
+            }
         }
 
         ctx.show_viewport_immediate(
@@ -3705,14 +4681,18 @@ impl App {
                     cfg.overlay_height = actual.y;
                     changed = true;
                 }
-                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-                    let pos = (rect.min.x, rect.min.y);
-                    if cfg
-                        .overlay_pos
-                        .is_none_or(|p| (p.0 - pos.0).abs() > 1.0 || (p.1 - pos.1).abs() > 1.0)
-                    {
-                        cfg.overlay_pos = Some(pos);
-                        changed = true;
+                // Suivi de position : pas pendant le drag (l'OS pilote, et on
+                // éviterait sinon une sauvegarde disque à chaque frame).
+                if !was_dragging {
+                    if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                        let pos = (rect.min.x, rect.min.y);
+                        if cfg
+                            .overlay_pos
+                            .is_none_or(|p| (p.0 - pos.0).abs() > 1.0 || (p.1 - pos.1).abs() > 1.0)
+                        {
+                            cfg.overlay_pos = Some(pos);
+                            changed = true;
+                        }
                     }
                 }
                 // Fondu au survol : on voit ce que l'overlay cache sans le déplacer.
@@ -3799,6 +4779,7 @@ impl App {
                                 egui::Sense::click_and_drag(),
                             );
                             if interact.dragged() && !cfg.overlay_locked {
+                                drag_now = true;
                                 ctx.send_viewport_cmd_to(
                                     overlay_id,
                                     egui::ViewportCommand::StartDrag,
@@ -3962,6 +4943,7 @@ impl App {
         if changed {
             self.config.save();
         }
+        self.overlay_dragging = drag_now;
     }
 }
 

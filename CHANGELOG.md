@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.0 — Optimisation de rotation
+
+- Nouvel onglet 🎯 Optimisation : classe tes sorts par efficacité pour t'aider à
+  prioriser ta rotation, à partir de tes vrais logs
+  - Deux lectures : **Eff/GCD** (« je lance quoi sur un GCD libre ? ») et
+    **DPS soutenu** (ce que le sort rapporte vraiment dans la durée, DoT et
+    cooldowns inclus)
+  - Colonne **Rôle** : 🔁 entretenir (DoT), ⏳ cooldown (à presser dès dispo),
+    ▶ filler ; couleurs par type (mono / AoE zone / AE encounter)
+  - Marche **sans combat** : choisis ta classe, ses sorts s'affichent (cast,
+    recast, type pré-remplis depuis une base de 1365 sorts), tu saisis les
+    dégâts du tooltip ; après un combat, ils se remplissent tout seuls
+  - Filtres de scénario (mono / N cibles / cibles liées), tri par colonne,
+    barres d'efficacité, sorts masquables
+  - **Diagnostic de rotation** : activité GCD vs temps mort, sorts à mieux
+    entretenir (uptime de tes DoT, gros cooldowns sous-utilisés)
+  - Classe auto-détectée et mémorisée par personnage
+- Overlay **mécaniques dédié** : fenêtre séparée listant les prochains casts de
+  boss en compte à rebours (en plus du décompte dans l'overlay DPS)
+- Combat : option « clore sur mon activité » (activée par défaut) — les combats
+  de joueurs hors groupe ou de PNJ à côté ne polluent plus ton parse et ne
+  gardent plus ton combat ouvert
+- Mécaniques apprises : seulement les boss (nameds), silencieuses par défaut, et
+  bouton 🧹 Nettoyer pour purger le trash déjà appris
+- Overlays : fin du tremblement au déplacement
+
 ## v0.4.0 — Mécaniques de boss
 
 - Nouvel onglet ⏱ Mécaniques : l'app apprend toute seule, depuis les logs, les
