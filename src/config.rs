@@ -112,6 +112,18 @@ pub struct Config {
     pub opt_hidden: std::collections::HashSet<String>,
     /// Classe détectée par personnage (auto-remplie à la détection du log).
     pub char_class: HashMap<String, String>,
+    /// Couleur custom (RGB) par joueur pour les barres d'overlay et les courbes
+    /// du graphe. Absent = couleur auto dérivée du hash du nom.
+    pub player_colors: HashMap<String, [u8; 3]>,
+    /// Overlay « rotation live » (fenêtre séparée : quoi caster maintenant).
+    pub rotation_overlay: bool,
+    pub rotation_overlay_pos: Option<(f32, f32)>,
+    pub rotation_overlay_width: f32,
+    pub rotation_overlay_height: f32,
+    /// Nombre de prochains sorts affichés dans l'overlay rotation.
+    pub rotation_count: usize,
+    /// Pré-alerte (s) avant qu'un DoT ne tombe (fenêtre d'anticipation).
+    pub rotation_lead: f32,
 }
 
 impl Default for Config {
@@ -170,6 +182,13 @@ impl Default for Config {
             opt_sort_desc: true,
             opt_hidden: std::collections::HashSet::new(),
             char_class: HashMap::new(),
+            player_colors: HashMap::new(),
+            rotation_overlay: false,
+            rotation_overlay_pos: None,
+            rotation_overlay_width: 230.0,
+            rotation_overlay_height: 170.0,
+            rotation_count: 4,
+            rotation_lead: 2.0,
         }
     }
 }

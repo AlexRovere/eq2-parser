@@ -268,6 +268,12 @@ pub struct Profiler {
     pub time: HashMap<String, u64>,
     /// Brouillon de l'encounter en cours : (perso, sort) → coups bruts.
     scratch: HashMap<(String, String), CastScratch>,
+    /// Dernier tick observé par (perso, sort) — sert à repérer les réapplications.
+    last_hit: HashMap<(String, String), u64>,
+    /// Dernière (ré)application détectée par (perso, sort) : état live pour la
+    /// rotation. Survit au `flush` (au contraire du `scratch`) pour rester
+    /// disponible entre deux ticks d'un même combat.
+    last_cast: HashMap<(String, String), u64>,
     pub dirty: bool,
 }
 
@@ -278,6 +284,27 @@ impl Profiler {
 
     /// Enregistre un coup d'un sort lancé par un joueur.
     pub fn observe(&mut self, epoch: u64, attacker: &str, ability: &str, target: &str, amount: u64, crit: bool) {
+        // État live pour la rotation : repère les (ré)applications. Un sort
+        // direct ré-applique à chaque coup ; un DoT seulement après un trou
+        // supérieur à sa cadence de tick (sinon ses ticks réguliers passeraient
+        // pour autant de recasts).
+        let key = (attacker.to_string(), ability.to_string());
+        let freq = self
+            .chars
+            .get(attacker)
+            .and_then(|m| m.get(ability))
+            .map(|o| o.freq)
+            .unwrap_or(0.0);
+        let gap = if freq > 0.0 { (freq * 2.0).max(2.0) } else { 4.0 };
+        let new_app = self
+            .last_hit
+            .get(&key)
+            .is_none_or(|&p| epoch.saturating_sub(p) as f32 > gap);
+        if new_app {
+            self.last_cast.insert(key.clone(), epoch);
+        }
+        self.last_hit.insert(key, epoch);
+
         let s = self
             .scratch
             .entry((attacker.to_string(), ability.to_string()))
@@ -379,6 +406,16 @@ impl Profiler {
             dst.last_seen = dst.last_seen.max(obs.last_seen);
         }
         out
+    }
+
+    /// État live de la rotation : dernier instant de (ré)application par sort
+    /// pour un personnage (clé = nom de sort).
+    pub fn last_casts(&self, ch: &str) -> HashMap<String, u64> {
+        self.last_cast
+            .iter()
+            .filter(|((c, _), _)| c == ch)
+            .map(|((_, a), t)| (a.clone(), *t))
+            .collect()
     }
 
     /// Personnages profilés ayant lancé au moins un sort (cumul ou en cours).
@@ -791,6 +828,122 @@ pub fn diagnose(rows: &[SpellRow], combat_time: f64) -> Diagnostic {
     Diagnostic { combat_time, total_casts, cast_time, gcd_util, low_yield_frac, underused }
 }
 
+// ---------------------------------------------------------------------------
+// Piste C : rotation live (« quoi caster maintenant »)
+// ---------------------------------------------------------------------------
+
+/// Rôle d'une suggestion de cast (détermine couleur et priorité dans l'overlay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastRole {
+    /// DoT tombé ou sur le point de tomber : à rafraîchir.
+    Refresh,
+    /// Gros cooldown prêt : à presser.
+    Cooldown,
+    /// Sort de remplissage au meilleur rendement, disponible.
+    Filler,
+}
+
+impl CastRole {
+    pub fn icon(self) -> &'static str {
+        match self {
+            CastRole::Refresh => "🔁",
+            CastRole::Cooldown => "⏳",
+            CastRole::Filler => "▶",
+        }
+    }
+}
+
+/// Une entrée de la file « prochains sorts ».
+#[derive(Debug, Clone)]
+pub struct Suggestion {
+    pub ability: String,
+    pub role: CastRole,
+    /// Détail court ("à poser", "tombé", "tombe dans 2 s", "prêt").
+    pub note: String,
+}
+
+/// Construit la file des prochains casts conseillés à l'instant `now`.
+///
+/// Priorité : (1) DoT tombé ou à moins de `lead` s de tomber → rafraîchir ;
+/// (2) gros cooldown prêt → presser ; (3) sinon le meilleur filler hors
+/// cooldown. Se fonde sur le dernier instant de cast réel par sort
+/// (`last_cast`, fourni par `Profiler::last_casts`).
+pub fn next_casts(
+    rows: &[SpellRow],
+    last_cast: &HashMap<String, u64>,
+    now: u64,
+    lead: f32,
+    max: usize,
+) -> Vec<Suggestion> {
+    let elapsed = |ability: &str| -> Option<f32> {
+        last_cast.get(ability).map(|&t| now.saturating_sub(t) as f32)
+    };
+
+    let mut refresh: Vec<(f32, Suggestion)> = Vec::new();
+    let mut cooldown: Vec<(f64, Suggestion)> = Vec::new();
+    let mut filler: Vec<(f64, Suggestion)> = Vec::new();
+
+    for r in rows {
+        if r.scenario_dmg <= 0.0 {
+            continue; // pas de modèle de dégâts : rien à conseiller.
+        }
+        let e = elapsed(&r.ability);
+        if r.is_dot {
+            // Cycle ≈ intervalle utile du DoT (sa durée en pratique).
+            let cycle = r.interval.max(1.0);
+            let remaining = match e {
+                None => -1.0, // jamais posé → à poser
+                Some(x) => cycle - x,
+            };
+            if remaining <= lead {
+                let note = if e.is_none() {
+                    "à poser".to_string()
+                } else if remaining <= 0.0 {
+                    "tombé".to_string()
+                } else {
+                    format!("tombe dans {remaining:.0} s")
+                };
+                refresh.push((
+                    remaining,
+                    Suggestion { ability: r.ability.clone(), role: CastRole::Refresh, note },
+                ));
+            }
+        } else if r.long_cd {
+            let reuse = r.recast_eff.unwrap_or(r.interval).max(0.1);
+            if e.is_none_or(|x| x >= reuse) {
+                cooldown.push((
+                    r.scenario_dmg,
+                    Suggestion { ability: r.ability.clone(), role: CastRole::Cooldown, note: "prêt".to_string() },
+                ));
+            }
+        } else {
+            // Filler : disponible s'il n'est pas en reuse court.
+            let reuse = r.recast_eff.unwrap_or(r.gcd).max(0.1);
+            if e.is_none_or(|x| x >= reuse) {
+                filler.push((
+                    r.efficiency,
+                    Suggestion { ability: r.ability.clone(), role: CastRole::Filler, note: String::new() },
+                ));
+            }
+        }
+    }
+
+    // Le plus urgent d'abord dans chaque catégorie.
+    refresh.sort_by(|a, b| a.0.total_cmp(&b.0));
+    cooldown.sort_by(|a, b| b.0.total_cmp(&a.0));
+    filler.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut out: Vec<Suggestion> = Vec::new();
+    out.extend(refresh.into_iter().map(|(_, s)| s));
+    out.extend(cooldown.into_iter().map(|(_, s)| s));
+    // Un seul filler (le meilleur dispo) suffit comme garniture de fin de file.
+    if let Some((_, s)) = filler.into_iter().next() {
+        out.push(s);
+    }
+    out.truncate(max.max(1));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,6 +1049,41 @@ mod tests {
         assert_eq!(d.underused[0].ability, "DoT lent");
         assert!(d.underused[0].uptime < 0.5);
         assert!(d.gcd_util > 0.0 && d.gcd_util <= 1.0);
+    }
+
+    #[test]
+    fn next_casts_prioritizes_fallen_dot() {
+        // Un DoT (cycle 12 s) posé à t=0, un filler spammable. À t=100 le DoT
+        // est tombé depuis longtemps → il doit passer devant le filler.
+        let rows = vec![
+            row("DoT lent", 1000.0, 1, 12.0, true, false),
+            row("Filler", 500.0, 1, 1.5, false, false),
+        ];
+        let mut last = HashMap::new();
+        last.insert("DoT lent".to_string(), 0u64);
+        last.insert("Filler".to_string(), 0u64);
+        let s = next_casts(&rows, &last, 100, 2.0, 3);
+        assert!(!s.is_empty());
+        assert_eq!(s[0].ability, "DoT lent");
+        assert_eq!(s[0].role, CastRole::Refresh);
+        // Le filler suit (disponible, meilleur rendement restant).
+        assert!(s.iter().any(|x| x.ability == "Filler" && x.role == CastRole::Filler));
+    }
+
+    #[test]
+    fn next_casts_holds_active_dot() {
+        // Le même DoT vient d'être posé (t=98, cycle 12) → pas encore à
+        // rafraîchir : seul le filler reste conseillé.
+        let rows = vec![
+            row("DoT lent", 1000.0, 1, 12.0, true, false),
+            row("Filler", 500.0, 1, 1.5, false, false),
+        ];
+        let mut last = HashMap::new();
+        last.insert("DoT lent".to_string(), 98u64);
+        last.insert("Filler".to_string(), 90u64);
+        let s = next_casts(&rows, &last, 100, 2.0, 3);
+        assert!(s.iter().all(|x| x.ability != "DoT lent"));
+        assert_eq!(s.first().map(|x| x.ability.as_str()), Some("Filler"));
     }
 
     #[test]

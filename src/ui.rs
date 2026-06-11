@@ -14,9 +14,30 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Couleur stable par joueur (hash du nom) — identique partout :
-/// overlay, graphes, jauges des tables. Ne change pas avec le tri.
+thread_local! {
+    /// Couleurs custom par joueur (RGB), rafraîchies depuis la config à chaque
+    /// frame. Permet à `player_color` de rester une fonction libre tout en
+    /// respectant les surcharges utilisateur partout (overlay, graphe, tables).
+    static PLAYER_COLOR_OVERRIDES: std::cell::RefCell<HashMap<String, [u8; 3]>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Publie les couleurs custom par joueur (appelé une fois par frame).
+fn set_player_color_overrides(map: &HashMap<String, [u8; 3]>) {
+    PLAYER_COLOR_OVERRIDES.with(|c| {
+        let mut cell = c.borrow_mut();
+        cell.clear();
+        cell.extend(map.iter().map(|(k, v)| (k.clone(), *v)));
+    });
+}
+
+/// Couleur stable par joueur — identique partout : overlay, graphes, jauges des
+/// tables. Une couleur custom configurée prime ; sinon dérivée du hash du nom
+/// (ne change pas avec le tri).
 fn player_color(name: &str) -> Color32 {
+    if let Some([r, g, b]) = PLAYER_COLOR_OVERRIDES.with(|c| c.borrow().get(name).copied()) {
+        return Color32::from_rgb(r, g, b);
+    }
     let mut h: u32 = 2166136261;
     for b in name.bytes() {
         h ^= b as u32;
@@ -210,6 +231,7 @@ pub struct App {
     /// drag (sinon ça se bat avec l'OS et l'overlay tremble).
     overlay_dragging: bool,
     mech_dragging: bool,
+    rotation_dragging: bool,
 }
 
 /// Changelog embarqué dans l'exécutable (mis à jour à chaque release).
@@ -290,6 +312,7 @@ impl App {
             opt_char_prev: None,
             overlay_dragging: false,
             mech_dragging: false,
+            rotation_dragging: false,
         };
         // Attache automatique : le log le plus récemment écrit (perso actif),
         // sinon le dernier log suivi.
@@ -887,6 +910,7 @@ impl eframe::App for App {
         self.engine.tick(Self::now_epoch());
         self.trigger_engine.tick();
         self.process_mechanic_alerts();
+        set_player_color_overrides(&self.config.player_colors);
 
         // Sauvegarde throttlée de la base de mécaniques apprise.
         if self.engine.mech.dirty && self.last_mech_save.elapsed() > Duration::from_secs(30) {
@@ -1077,6 +1101,9 @@ impl eframe::App for App {
         }
         if self.config.mech_overlay_window && self.config.mechanics_enabled {
             self.show_mech_overlay(ctx);
+        }
+        if self.config.rotation_overlay {
+            self.show_rotation_overlay(ctx);
         }
 
         // Export PNG du graphe : screenshot du viewport puis recadrage.
@@ -1746,6 +1773,40 @@ impl App {
         if scenario_changed {
             self.config.save();
         }
+
+        // --- Overlay rotation live (« prochain sort ») ---
+        let mut rot_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            rot_changed |= ui
+                .checkbox(&mut self.config.rotation_overlay, "🎯 Overlay rotation live")
+                .on_hover_text(
+                    "Fenêtre séparée toujours au-dessus : la file des prochains sorts à \
+                     caster, mise à jour selon l'état réel du combat (DoT tombés, cooldowns \
+                     prêts). Suit le perso actif.",
+                )
+                .changed();
+            if self.config.rotation_overlay {
+                ui.separator();
+                ui.label("Sorts affichés");
+                rot_changed |= ui
+                    .add(egui::DragValue::new(&mut self.config.rotation_count).range(1..=8))
+                    .changed();
+                ui.separator();
+                ui.label("Anticipation DoT (s)");
+                rot_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut self.config.rotation_lead)
+                            .range(0.0..=5.0)
+                            .speed(0.5),
+                    )
+                    .on_hover_text("Prévenir N secondes avant qu'un DoT ne tombe.")
+                    .changed();
+            }
+        });
+        if rot_changed {
+            self.config.save();
+        }
+
         ui.label(
             RichText::new(
                 "Dégâts auto depuis tes logs (bleu), sinon saisis-les à la main (tooltip). \
@@ -2933,6 +2994,31 @@ impl App {
                 .color_edit_button_srgb(&mut self.config.overlay_accent)
                 .changed();
         });
+        // Couleur de barre/courbe du perso suivi (fond des barres d'overlay et
+        // ligne du graphe). Vide = couleur auto dérivée du nom.
+        if let Some(me) = self.self_name().map(|s| s.to_string()) {
+            ui.horizontal(|ui| {
+                ui.label(format!("Couleur de {me} (barre + graphe) :"));
+                let custom = self.config.player_colors.contains_key(&me);
+                let mut rgb = self.config.player_colors.get(&me).copied().unwrap_or_else(|| {
+                    let c = player_color(&me);
+                    [c.r(), c.g(), c.b()]
+                });
+                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                    self.config.player_colors.insert(me.clone(), rgb);
+                    changed = true;
+                }
+                if custom
+                    && ui
+                        .button("⟲")
+                        .on_hover_text("Revenir à la couleur automatique")
+                        .clicked()
+                {
+                    self.config.player_colors.remove(&me);
+                    changed = true;
+                }
+            });
+        }
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut self.config.overlay_title_stats, "Titre détaillé")
@@ -4432,6 +4518,211 @@ impl App {
             cfg.save();
         }
         self.mech_dragging = drag_now;
+    }
+
+    /// Sorts profilés du perso suivi (mêmes données que l'onglet Optimisation),
+    /// pour alimenter la rotation live. Renvoie le perso retenu et ses lignes.
+    fn rotation_rows(&self) -> Option<(String, Vec<crate::optimizer::SpellRow>)> {
+        // Suit le perso actif (self_name), sinon le choix de l'onglet Optimisation.
+        let me = self.engine.self_name.clone();
+        let ch = if !me.is_empty() { Some(me) } else { self.opt_char.clone() }?;
+        let obs = self.engine.prof.live(&ch);
+        let class_hint = self.spell_db.infer_class(obs.keys());
+        let class = self
+            .config
+            .char_class
+            .get(&ch)
+            .cloned()
+            .or_else(|| class_hint.clone());
+        let stats = self.config.player_stats.get(&ch).cloned().unwrap_or_default();
+        let sc = crate::optimizer::Scenario {
+            targets: self.config.opt_targets,
+            linked: self.config.opt_linked,
+        };
+        let rows = crate::optimizer::report(
+            &obs,
+            &self.spell_db,
+            class_hint.as_deref().or(class.as_deref()),
+            &stats,
+            &sc,
+            &self.config.cast_overrides,
+            &self.config.spell_damage,
+            class.as_deref(),
+            false,
+        );
+        Some((ch, rows))
+    }
+
+    /// Overlay « rotation live » : la file des prochains sorts à caster, calculée
+    /// à partir des profils de sorts et de l'état réel du combat (DoT tombés,
+    /// cooldowns prêts). Fenêtre séparée, même gabarit que l'overlay mécaniques.
+    fn show_rotation_overlay(&mut self, ctx: &egui::Context) {
+        let id = egui::ViewportId::from_hash_of("eq2_rotation_overlay");
+        let now = Self::now_epoch();
+
+        let (char_name, sugg) = match self.rotation_rows() {
+            Some((ch, rows)) => {
+                let last = self.engine.prof.last_casts(&ch);
+                let s = crate::optimizer::next_casts(
+                    &rows,
+                    &last,
+                    now,
+                    self.config.rotation_lead,
+                    self.config.rotation_count,
+                );
+                (ch, s)
+            }
+            None => (String::new(), Vec::new()),
+        };
+
+        let was_dragging = self.rotation_dragging;
+        let cfg = &mut self.config;
+        let s = cfg.overlay_scale.clamp(0.6, 2.5);
+        let bg = Color32::from_rgba_unmultiplied(
+            cfg.overlay_bg[0],
+            cfg.overlay_bg[1],
+            cfg.overlay_bg[2],
+            (cfg.overlay_opacity * 235.0) as u8,
+        );
+        let mut changed = false;
+        let mut drag_now = false;
+
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("EQ2 Rotation")
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_resizable(true)
+            .with_min_inner_size([150.0, 50.0])
+            .with_inner_size([cfg.rotation_overlay_width, cfg.rotation_overlay_height]);
+        if !was_dragging {
+            if let Some((x, y)) = cfg.rotation_overlay_pos {
+                builder = builder.with_position([x, y]);
+            }
+        }
+
+        ctx.show_viewport_immediate(id, builder, |ctx, _class| {
+            let actual = ctx.input(|i| i.screen_rect().size());
+            if (actual.x - cfg.rotation_overlay_width).abs() > 1.0
+                || (actual.y - cfg.rotation_overlay_height).abs() > 1.0
+            {
+                cfg.rotation_overlay_width = actual.x;
+                cfg.rotation_overlay_height = actual.y;
+                changed = true;
+            }
+            if !was_dragging {
+                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    let pos = (rect.min.x, rect.min.y);
+                    if cfg
+                        .rotation_overlay_pos
+                        .is_none_or(|p| (p.0 - pos.0).abs() > 1.0 || (p.1 - pos.1).abs() > 1.0)
+                    {
+                        cfg.rotation_overlay_pos = Some(pos);
+                        changed = true;
+                    }
+                }
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let frame = egui::Frame::new().fill(bg).corner_radius(8.0).inner_margin(8.0);
+                    frame.show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let resp = ui
+                            .horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("🎯 Rotation")
+                                        .size(11.0 * s)
+                                        .color(Color32::WHITE),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("✖")
+                                                        .size(11.0 * s)
+                                                        .color(Color32::from_rgb(231, 76, 60)),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(
+                                                "Masquer (réactivable dans l'onglet Optimisation)",
+                                            )
+                                            .clicked()
+                                        {
+                                            cfg.rotation_overlay = false;
+                                            changed = true;
+                                        }
+                                    },
+                                );
+                            })
+                            .response;
+                        let mut drag_rect = resp.rect.expand2(egui::vec2(0.0, 4.0));
+                        drag_rect.max.x -= 26.0 * s;
+                        let interact = ui.interact(
+                            drag_rect,
+                            ui.id().with("rot_drag"),
+                            egui::Sense::click_and_drag(),
+                        );
+                        if interact.dragged() {
+                            drag_now = true;
+                            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::StartDrag);
+                        }
+                        ui.separator();
+                        if sugg.is_empty() {
+                            let msg = if char_name.is_empty() {
+                                "Aucun perso suivi.".to_string()
+                            } else {
+                                format!("{char_name} : lance un combat pour voir la rotation.")
+                            };
+                            ui.label(RichText::new(msg).size(10.0 * s).weak());
+                        } else {
+                            for (i, sg) in sugg.iter().enumerate() {
+                                let col = match sg.role {
+                                    crate::optimizer::CastRole::Refresh => {
+                                        Color32::from_rgb(230, 126, 34)
+                                    }
+                                    crate::optimizer::CastRole::Cooldown => {
+                                        Color32::from_rgb(46, 204, 113)
+                                    }
+                                    crate::optimizer::CastRole::Filler => {
+                                        Color32::from_rgb(150, 160, 175)
+                                    }
+                                };
+                                // 1re ligne = prochain sort (plus gros), le reste = file.
+                                let size = if i == 0 { 15.0 * s } else { 12.0 * s };
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(sg.role.icon()).size(size));
+                                    ui.label(
+                                        RichText::new(&sg.ability).size(size).strong().color(col),
+                                    );
+                                    if !sg.note.is_empty() {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(&sg.note).size(10.0 * s).weak(),
+                                                );
+                                            },
+                                        );
+                                    }
+                                });
+                                if i == 0 && sugg.len() > 1 {
+                                    ui.separator();
+                                }
+                            }
+                        }
+                    });
+                });
+        });
+
+        if changed {
+            cfg.save();
+        }
+        self.rotation_dragging = drag_now;
     }
 
     fn show_overlay(&mut self, ctx: &egui::Context) {

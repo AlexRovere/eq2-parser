@@ -98,10 +98,18 @@ L'onglet donne une **priorité**, pas un ordre à suivre aveuglément :
 
 ---
 
-## 9. Piste C : rotation live (à faire)
+## 9. Piste C : rotation live (livrée)
 
 Objectif : un overlay **« prochain sort »** qui dit en temps réel quoi caster,
 en tenant compte de l'état réel du combat (DoT tombés, cooldowns prêts).
+
+> **Statut : livré.** Overlay optionnel activable dans l'onglet Optimisation
+> (« 🎯 Overlay rotation live »), fenêtre séparée always-on-top suivant le perso
+> actif. Moteur `optimizer::next_casts` (file priorisée : DoT tombé → cooldown
+> prêt → meilleur filler), état live `Profiler::last_casts` (détection des
+> réapplications par trou de cadence). Réglages : nombre de sorts affichés,
+> anticipation DoT (s). Limites V1 connues conservées (snapshot DoT, recast d'un
+> DoT non tombé non détecté, granularité log à la seconde).
 
 ### Principe
 

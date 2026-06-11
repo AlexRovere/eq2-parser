@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.0 — Rotation live + couleur de perso
+
+- Overlay **rotation live** (« prochain sort ») : une fenêtre séparée, toujours
+  au-dessus, qui te dit quoi caster maintenant selon l'état réel du combat
+  - File priorisée : 🔁 DoT tombé (ou sur le point) à rafraîchir, ⏳ gros
+    cooldown prêt à presser, ▶ meilleur filler disponible
+  - Optionnel, à activer dans l'onglet 🎯 Optimisation ; suit le perso actif et
+    réutilise tes stats (casting/reuse) et ton scénario
+  - Réglages : nombre de sorts affichés, anticipation avant qu'un DoT ne tombe
+  - C'est un assistant qui *suggère* : il ne joue pas à ta place
+- **Couleur de personnage** personnalisable : choisis la couleur de ta barre
+  dans Settings > Overlay ; elle s'applique partout (overlay, courbes du graphe,
+  jauges des tables), avec retour à la couleur automatique en un clic
+
 ## v0.5.0 — Optimisation de rotation
 
 - Nouvel onglet 🎯 Optimisation : classe tes sorts par efficacité pour t'aider à
