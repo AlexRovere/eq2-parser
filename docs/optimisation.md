@@ -105,8 +105,8 @@ en tenant compte de l'état réel du combat (DoT tombés, cooldowns prêts).
 
 > **Statut : livré.** Overlay optionnel activable dans l'onglet Optimisation
 > (« 🎯 Overlay rotation live »), fenêtre séparée always-on-top suivant le perso
-> actif. Moteur `optimizer::next_casts` (file priorisée : DoT tombé → cooldown
-> prêt → meilleur filler), état live `Profiler::last_casts` (détection des
+> actif. Moteur `optimizer::next_casts` (file priorisée : gros cooldown prêt →
+> DoT tombé → meilleur filler), état live `Profiler::last_casts` (détection des
 > réapplications par trou de cadence). Réglages : nombre de sorts affichés,
 > anticipation DoT (s). Limites V1 connues conservées (snapshot DoT, recast d'un
 > DoT non tombé non détecté, granularité log à la seconde).
@@ -119,9 +119,9 @@ Un moteur de priorité dynamique, réévalué à chaque tick :
    - DoT : reste-t-il du temps avant expiration ? (dernier cast + durée)
    - Cooldown : prêt ? (dernier cast + reuse effectif)
    - Disponibilité : hors GCD courant.
-2. **Décision** à chaque GCD libre, par ordre :
-   - un **DoT rentable tombé (ou sur le point)** → le rafraîchir ;
+2. **Décision** à chaque GCD libre, par ordre (gros dégâts d'abord) :
    - un **gros cooldown prêt** (haute valeur) → le presser ;
+   - un **DoT rentable tombé (ou sur le point)** → le rafraîchir ;
    - sinon le **filler au plus haut Eff/GCD** disponible.
 3. **Sortie** : overlay dédié (réutiliser `show_mech_overlay` comme gabarit) :
    - en gros : le **sort à lancer maintenant** ;

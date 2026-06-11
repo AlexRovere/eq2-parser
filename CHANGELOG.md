@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.1 — Overlays redimensionnables
+
+- Les overlays **mécaniques** et **rotation** se redimensionnent maintenant par
+  le grip ↘ en bas à droite, comme l'overlay DPS
+- Rotation live : les **gros cooldowns (gros dégâts) passent avant** le
+  rafraîchissement des DoT dans la file des prochains sorts
+
 ## v0.6.0 — Rotation live + couleur de perso
 
 - Overlay **rotation live** (« prochain sort ») : une fenêtre séparée, toujours

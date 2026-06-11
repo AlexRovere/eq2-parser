@@ -864,10 +864,10 @@ pub struct Suggestion {
 
 /// Construit la file des prochains casts conseillés à l'instant `now`.
 ///
-/// Priorité : (1) DoT tombé ou à moins de `lead` s de tomber → rafraîchir ;
-/// (2) gros cooldown prêt → presser ; (3) sinon le meilleur filler hors
-/// cooldown. Se fonde sur le dernier instant de cast réel par sort
-/// (`last_cast`, fourni par `Profiler::last_casts`).
+/// Priorité : (1) gros cooldown prêt → le presser (gros dégâts d'abord) ;
+/// (2) DoT tombé ou à moins de `lead` s de tomber → rafraîchir ; (3) sinon le
+/// meilleur filler hors cooldown. Se fonde sur le dernier instant de cast réel
+/// par sort (`last_cast`, fourni par `Profiler::last_casts`).
 pub fn next_casts(
     rows: &[SpellRow],
     last_cast: &HashMap<String, u64>,
@@ -933,9 +933,11 @@ pub fn next_casts(
     cooldown.sort_by(|a, b| b.0.total_cmp(&a.0));
     filler.sort_by(|a, b| b.0.total_cmp(&a.0));
 
+    // Les gros cooldowns (gros dégâts) passent devant le rafraîchissement des
+    // DoT ; les fillers garnissent la fin de file.
     let mut out: Vec<Suggestion> = Vec::new();
-    out.extend(refresh.into_iter().map(|(_, s)| s));
     out.extend(cooldown.into_iter().map(|(_, s)| s));
+    out.extend(refresh.into_iter().map(|(_, s)| s));
     // Un seul filler (le meilleur dispo) suffit comme garniture de fin de file.
     if let Some((_, s)) = filler.into_iter().next() {
         out.push(s);
@@ -1068,6 +1070,21 @@ mod tests {
         assert_eq!(s[0].role, CastRole::Refresh);
         // Le filler suit (disponible, meilleur rendement restant).
         assert!(s.iter().any(|x| x.ability == "Filler" && x.role == CastRole::Filler));
+    }
+
+    #[test]
+    fn next_casts_puts_big_cooldown_before_dot() {
+        // Un gros cooldown prêt (gros dégâts) doit passer devant un DoT tombé.
+        let mut nuke = row("Gros nuke", 50_000.0, 1, 30.0, false, true);
+        nuke.recast_eff = Some(30.0);
+        let rows = vec![nuke, row("DoT lent", 1000.0, 1, 12.0, true, false)];
+        let mut last = HashMap::new();
+        last.insert("Gros nuke".to_string(), 0u64);
+        last.insert("DoT lent".to_string(), 0u64);
+        let s = next_casts(&rows, &last, 100, 2.0, 3);
+        assert_eq!(s[0].ability, "Gros nuke");
+        assert_eq!(s[0].role, CastRole::Cooldown);
+        assert!(s.iter().any(|x| x.ability == "DoT lent" && x.role == CastRole::Refresh));
     }
 
     #[test]

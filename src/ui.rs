@@ -4510,6 +4510,7 @@ impl App {
                                 bar_row(ui, label, &format!("{eta:.0} s"), *frac, col, Color32::WHITE, s);
                             }
                         }
+                        resize_grip(ctx, ui, id);
                     });
                 });
         });
@@ -4715,6 +4716,7 @@ impl App {
                                 }
                             }
                         }
+                        resize_grip(ctx, ui, id);
                     });
                 });
         });
@@ -5183,44 +5185,8 @@ impl App {
                         });
 
                         // Grip de redimensionnement (coin bas-droit), comme une fenêtre.
-                        if cfg.overlay_locked {
-                            return;
-                        }
-                        let screen = ctx.screen_rect();
-                        let grip = 16.0;
-                        let grip_rect = egui::Rect::from_min_max(
-                            screen.max - egui::vec2(grip, grip),
-                            screen.max,
-                        );
-                        let grip_resp = ui.interact(
-                            grip_rect,
-                            ui.id().with("resize_grip"),
-                            egui::Sense::drag(),
-                        );
-                        if grip_resp.drag_started() {
-                            ctx.send_viewport_cmd_to(
-                                overlay_id,
-                                egui::ViewportCommand::BeginResize(
-                                    egui::viewport::ResizeDirection::SouthEast,
-                                ),
-                            );
-                        }
-                        if grip_resp.hovered() {
-                            ctx.set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
-                        }
-                        // Trois traits diagonaux, plus visibles au survol.
-                        let alpha = if grip_resp.hovered() { 200 } else { 90 };
-                        let gc = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
-                        let p = ui.painter();
-                        for k in 1..=3 {
-                            let off = k as f32 * 4.0;
-                            p.line_segment(
-                                [
-                                    egui::pos2(screen.max.x - off, screen.max.y - 2.0),
-                                    egui::pos2(screen.max.x - 2.0, screen.max.y - off),
-                                ],
-                                egui::Stroke::new(1.5, gc),
-                            );
+                        if !cfg.overlay_locked {
+                            resize_grip(ctx, ui, overlay_id);
                         }
                     });
             },
@@ -5370,6 +5336,40 @@ fn overlay_quick_menu(
             ui.close_menu();
         }
     });
+}
+
+/// Grip de redimensionnement (coin bas-droit) pour un overlay sans décorations :
+/// lance le resize piloté par l'OS au drag. À appeler en dernier dans le contenu
+/// de l'overlay (il se peint sur le coin de la fenêtre `id`).
+fn resize_grip(ctx: &egui::Context, ui: &egui::Ui, id: egui::ViewportId) {
+    let screen = ctx.screen_rect();
+    let grip = 16.0;
+    let grip_rect =
+        egui::Rect::from_min_max(screen.max - egui::vec2(grip, grip), screen.max);
+    let grip_resp = ui.interact(grip_rect, ui.id().with("resize_grip"), egui::Sense::drag());
+    if grip_resp.drag_started() {
+        ctx.send_viewport_cmd_to(
+            id,
+            egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::SouthEast),
+        );
+    }
+    if grip_resp.hovered() {
+        ctx.set_cursor_icon(egui::CursorIcon::ResizeSouthEast);
+    }
+    // Trois traits diagonaux, plus visibles au survol.
+    let alpha = if grip_resp.hovered() { 200 } else { 90 };
+    let gc = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+    let p = ui.painter();
+    for k in 1..=3 {
+        let off = k as f32 * 4.0;
+        p.line_segment(
+            [
+                egui::pos2(screen.max.x - off, screen.max.y - 2.0),
+                egui::pos2(screen.max.x - 2.0, screen.max.y - off),
+            ],
+            egui::Stroke::new(1.5, gc),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
