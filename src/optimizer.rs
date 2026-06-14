@@ -516,6 +516,22 @@ fn fold(sc: &CastScratch) -> AbilityObs {
 pub struct Scenario {
     pub targets: u32,
     pub linked: bool,
+    /// Temps de combat restant estimé (s) : sert à escompter les DoT qui
+    /// n'auront pas le temps de tiquer jusqu'au bout. `None` = pas d'escompte
+    /// (on suppose que tout DoT va à son terme, comportement « combat long »).
+    pub remaining: Option<f32>,
+}
+
+impl Scenario {
+    /// Facteur d'escompte d'un DoT (0..1) : part de sa durée qui tiquera
+    /// réellement avant la fin estimée du combat. 1.0 pour un direct, ou quand
+    /// aucun temps restant n'est connu.
+    fn dot_factor(self, is_dot: bool, dot_dur: f32) -> f64 {
+        match self.remaining {
+            Some(r) if is_dot && dot_dur > 0.0 => (r / dot_dur).clamp(0.0, 1.0) as f64,
+            _ => 1.0,
+        }
+    }
 }
 
 /// Stats offensives du personnage (saisies à la main, persistées par perso).
@@ -684,8 +700,16 @@ pub fn report(
                 (m, m, false, 0.0, 1.0, 0, 0)
             };
 
+        // Un DoT n'encaisse que la part de sa durée qui tiquera avant la mort
+        // de la cible : sur un combat court (trash, gros pack qui fond), on
+        // escompte ses dégâts au prorata du temps restant. Un direct, lui, est
+        // encaissé d'un coup, donc jamais escompté.
+        let is_dot = kind.contains("DoT");
+        let dot_dur = if is_dot { info.and_then(|i| i.duration).unwrap_or(0.0) } else { 0.0 };
+        let dot_factor = sc.dot_factor(is_dot, dot_dur);
+
         let eff_targets = target.effective_targets(sc, avg_targets);
-        let scenario_dmg = per_target * eff_targets;
+        let scenario_dmg = per_target * eff_targets * dot_factor;
 
         // Temps de cast : surcharge manuelle > base > inféré (1 s par défaut).
         let (base_cast, from_db) = if let Some(ov) = overrides.get(&a.display) {
@@ -702,8 +726,6 @@ pub fn report(
 
         // Intervalle utile : un DoT se re-applique au mieux à sa durée ; tout
         // sort est borné par son reuse et par le GCD. Le DPS soutenu en découle.
-        let is_dot = kind.contains("DoT");
-        let dot_dur = if is_dot { info.and_then(|i| i.duration).unwrap_or(0.0) } else { 0.0 };
         let reuse = recast_eff.unwrap_or(0.0);
         let interval = gcd.max(reuse).max(dot_dur).max(0.1);
         let sustained_dps = scenario_dmg / interval as f64;
@@ -862,12 +884,19 @@ pub struct Suggestion {
     pub note: String,
 }
 
-/// Construit la file des prochains casts conseillés à l'instant `now`.
+/// Construit la file des prochains casts conseillés à partir de l'instant `now`.
 ///
-/// Priorité : (1) gros cooldown prêt → le presser (gros dégâts d'abord) ;
-/// (2) DoT tombé ou à moins de `lead` s de tomber → rafraîchir ; (3) sinon le
-/// meilleur filler hors cooldown. Se fonde sur le dernier instant de cast réel
-/// par sort (`last_cast`, fourni par `Profiler::last_casts`).
+/// On simule la rotation slot de GCD par slot de GCD : à chaque case on choisit
+/// la meilleure action disponible (un seul cast par GCD), on avance le temps du
+/// GCD du sort retenu, puis on recommence. Une seule action par case évite
+/// d'afficher plusieurs cooldowns « prêts en même temps » comme s'ils pouvaient
+/// être lancés simultanément, et garnit les trous avec des fillers réalistes.
+///
+/// Priorité à chaque case : (1) gros cooldown prêt → le presser (gros dégâts
+/// d'abord) ; (2) DoT tombé ou sur le point de tomber → rafraîchir ; (3) sinon
+/// le meilleur filler hors reuse. Se fonde sur le dernier instant de cast réel
+/// par sort (`last_cast`, fourni par `Profiler::last_casts`), tenu à jour
+/// virtuellement à mesure qu'on planifie les cases.
 pub fn next_casts(
     rows: &[SpellRow],
     last_cast: &HashMap<String, u64>,
@@ -875,74 +904,79 @@ pub fn next_casts(
     lead: f32,
     max: usize,
 ) -> Vec<Suggestion> {
-    let elapsed = |ability: &str| -> Option<f32> {
-        last_cast.get(ability).map(|&t| now.saturating_sub(t) as f32)
-    };
-
-    let mut refresh: Vec<(f32, Suggestion)> = Vec::new();
-    let mut cooldown: Vec<(f64, Suggestion)> = Vec::new();
-    let mut filler: Vec<(f64, Suggestion)> = Vec::new();
-
+    // Instant du dernier cast, relatif à `now` (négatif = lancé avant `now`),
+    // mis à jour au fil des cases planifiées.
+    let mut last_rel: HashMap<String, f32> = HashMap::new();
     for r in rows {
-        if r.scenario_dmg <= 0.0 {
-            continue; // pas de modèle de dégâts : rien à conseiller.
-        }
-        let e = elapsed(&r.ability);
-        if r.is_dot {
-            // Cycle ≈ intervalle utile du DoT (sa durée en pratique).
-            let cycle = r.interval.max(1.0);
-            let remaining = match e {
-                None => -1.0, // jamais posé → à poser
-                Some(x) => cycle - x,
-            };
-            if remaining <= lead {
-                let note = if e.is_none() {
-                    "à poser".to_string()
-                } else if remaining <= 0.0 {
-                    "tombé".to_string()
-                } else {
-                    format!("tombe dans {remaining:.0} s")
-                };
-                refresh.push((
-                    remaining,
-                    Suggestion { ability: r.ability.clone(), role: CastRole::Refresh, note },
-                ));
-            }
-        } else if r.long_cd {
-            let reuse = r.recast_eff.unwrap_or(r.interval).max(0.1);
-            if e.is_none_or(|x| x >= reuse) {
-                cooldown.push((
-                    r.scenario_dmg,
-                    Suggestion { ability: r.ability.clone(), role: CastRole::Cooldown, note: "prêt".to_string() },
-                ));
-            }
-        } else {
-            // Filler : disponible s'il n'est pas en reuse court.
-            let reuse = r.recast_eff.unwrap_or(r.gcd).max(0.1);
-            if e.is_none_or(|x| x >= reuse) {
-                filler.push((
-                    r.efficiency,
-                    Suggestion { ability: r.ability.clone(), role: CastRole::Filler, note: String::new() },
-                ));
-            }
+        if let Some(&t) = last_cast.get(&r.ability) {
+            last_rel.insert(r.ability.clone(), -(now.saturating_sub(t) as f32));
         }
     }
 
-    // Le plus urgent d'abord dans chaque catégorie.
-    refresh.sort_by(|a, b| a.0.total_cmp(&b.0));
-    cooldown.sort_by(|a, b| b.0.total_cmp(&a.0));
-    filler.sort_by(|a, b| b.0.total_cmp(&a.0));
-
-    // Les gros cooldowns (gros dégâts) passent devant le rafraîchissement des
-    // DoT ; les fillers garnissent la fin de file.
     let mut out: Vec<Suggestion> = Vec::new();
-    out.extend(cooldown.into_iter().map(|(_, s)| s));
-    out.extend(refresh.into_iter().map(|(_, s)| s));
-    // Un seul filler (le meilleur dispo) suffit comme garniture de fin de file.
-    if let Some((_, s)) = filler.into_iter().next() {
-        out.push(s);
+    let mut t = 0.0f32; // instant simulé de la case courante (s depuis `now`).
+    for _ in 0..max.max(1) {
+        let mut best_cd: Option<(f64, &SpellRow)> = None;
+        let mut best_refresh: Option<(f32, &SpellRow)> = None; // (temps restant, sort)
+        let mut best_filler: Option<(f64, &SpellRow)> = None;
+
+        for r in rows {
+            if r.scenario_dmg <= 0.0 {
+                continue; // pas de modèle de dégâts : rien à conseiller.
+            }
+            let e = last_rel.get(&r.ability).map(|&lt| t - lt); // écoulé à l'instant t
+            if r.is_dot {
+                // Cycle ≈ intervalle utile du DoT (sa durée en pratique). On
+                // anticipe d'au moins le temps de cast du DoT : prévenir 1 s
+                // avant un DoT qui s'incante en 2 s le ferait tomber à coup sûr.
+                let cycle = r.interval.max(1.0);
+                let lead_eff = lead.max(r.cast_eff);
+                let remaining = match e {
+                    None => -1.0, // jamais posé → à poser
+                    Some(x) => cycle - x,
+                };
+                if remaining <= lead_eff && best_refresh.is_none_or(|(rem, _)| remaining < rem) {
+                    best_refresh = Some((remaining, r));
+                }
+            } else if r.long_cd {
+                let reuse = r.recast_eff.unwrap_or(r.interval).max(0.1);
+                if e.is_none_or(|x| x >= reuse)
+                    && best_cd.is_none_or(|(d, _)| r.scenario_dmg > d)
+                {
+                    best_cd = Some((r.scenario_dmg, r));
+                }
+            } else {
+                // Filler : disponible s'il n'est pas en reuse court.
+                let reuse = r.recast_eff.unwrap_or(r.gcd).max(0.1);
+                if e.is_none_or(|x| x >= reuse)
+                    && best_filler.is_none_or(|(eff, _)| r.efficiency > eff)
+                {
+                    best_filler = Some((r.efficiency, r));
+                }
+            }
+        }
+
+        // Gros cooldown d'abord, puis rafraîchissement de DoT, puis filler.
+        let chosen = if let Some((_, r)) = best_cd {
+            Some((r, CastRole::Cooldown, "prêt".to_string()))
+        } else if let Some((remaining, r)) = best_refresh {
+            let note = if !last_rel.contains_key(&r.ability) {
+                "à poser".to_string()
+            } else if remaining <= 0.0 {
+                "tombé".to_string()
+            } else {
+                format!("tombe dans {remaining:.0} s")
+            };
+            Some((r, CastRole::Refresh, note))
+        } else {
+            best_filler.map(|(_, r)| (r, CastRole::Filler, String::new()))
+        };
+
+        let Some((r, role, note)) = chosen else { break };
+        out.push(Suggestion { ability: r.ability.clone(), role, note });
+        last_rel.insert(r.ability.clone(), t);
+        t += r.gcd.max(0.1);
     }
-    out.truncate(max.max(1));
     out
 }
 
@@ -1007,11 +1041,25 @@ mod tests {
             },
         );
         let stats = PlayerStats::default();
-        let sc = Scenario { targets: 1, linked: true };
+        let sc = Scenario { targets: 1, linked: true, remaining: None };
         let necro = report(&obs, &db, None, &stats, &sc, &Default::default(), &Default::default(), Some("necromancer"), false);
         assert!(necro.iter().any(|r| r.ability == "Soulrot"));
         let wiz = report(&obs, &db, None, &stats, &sc, &Default::default(), &Default::default(), Some("wizard"), false);
         assert!(!wiz.iter().any(|r| r.ability == "Soulrot"));
+    }
+
+    #[test]
+    fn dot_discounted_on_short_fight() {
+        // DoT de 24 s : combat illimité → pleine valeur ; combat de 6 s →
+        // seulement 1/4 encaissé ; un direct n'est jamais escompté.
+        let long = Scenario { targets: 1, linked: true, remaining: None };
+        let short = Scenario { targets: 1, linked: true, remaining: Some(6.0) };
+        assert!((long.dot_factor(true, 24.0) - 1.0).abs() < 1e-6);
+        assert!((short.dot_factor(true, 24.0) - 0.25).abs() < 1e-6);
+        // Direct (is_dot = false) : jamais escompté, même combat court.
+        assert!((short.dot_factor(false, 0.0) - 1.0).abs() < 1e-6);
+        // Restant ≥ durée : pas d'escompte (clamp à 1).
+        assert!((short.dot_factor(true, 4.0) - 1.0).abs() < 1e-6);
     }
 
     fn row(ability: &str, dmg: f64, casts: u32, interval: f32, is_dot: bool, long_cd: bool) -> SpellRow {
@@ -1085,6 +1133,39 @@ mod tests {
         assert_eq!(s[0].ability, "Gros nuke");
         assert_eq!(s[0].role, CastRole::Cooldown);
         assert!(s.iter().any(|x| x.ability == "DoT lent" && x.role == CastRole::Refresh));
+    }
+
+    #[test]
+    fn next_casts_fills_gaps_with_multiple_fillers() {
+        // Un seul gros cooldown prêt + un filler spammable, file de 3 : le
+        // cooldown ouvre, puis les cases libres se garnissent de fillers (la
+        // simulation par GCD ne montre pas 3 sorts « prêts en même temps »).
+        let mut nuke = row("Gros nuke", 50_000.0, 1, 30.0, false, true);
+        nuke.recast_eff = Some(30.0);
+        let rows = vec![nuke, row("Filler", 500.0, 1, 1.5, false, false)];
+        let mut last = HashMap::new();
+        last.insert("Gros nuke".to_string(), 0u64);
+        last.insert("Filler".to_string(), 0u64);
+        let s = next_casts(&rows, &last, 100, 2.0, 3);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0].ability, "Gros nuke");
+        assert!(s[1..].iter().all(|x| x.ability == "Filler" && x.role == CastRole::Filler));
+    }
+
+    #[test]
+    fn next_casts_lead_accounts_for_cast_time() {
+        // DoT cycle 12 s, posé il y a 10 s (reste 2 s), s'incantant en 3 s.
+        // Avec un lead global de 1 s seul il serait jugé « pas encore » ; le
+        // lead effectif (max(1, cast 3)) le fait remonter à rafraîchir.
+        let mut dot = row("DoT lourd", 1000.0, 1, 12.0, true, false);
+        dot.cast_eff = 3.0;
+        let rows = vec![dot, row("Filler", 500.0, 1, 1.5, false, false)];
+        let mut last = HashMap::new();
+        last.insert("DoT lourd".to_string(), 90u64); // posé à t=90, now=100 → 10 s
+        last.insert("Filler".to_string(), 90u64);
+        let s = next_casts(&rows, &last, 100, 1.0, 3);
+        assert_eq!(s[0].ability, "DoT lourd");
+        assert_eq!(s[0].role, CastRole::Refresh);
     }
 
     #[test]

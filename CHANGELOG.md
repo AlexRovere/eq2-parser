@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.3 — File de rotation séquencée sur le GCD
+
+- L'overlay **rotation live** simule désormais la rotation **case de GCD par
+  case de GCD** : un seul cast par GCD, le temps avance, puis on recommence.
+  Plusieurs cooldowns prêts en même temps ne s'affichent plus comme lançables
+  simultanément ; ils s'ordonnent dans le temps et les cases libres se
+  garnissent de **plusieurs fillers** réalistes
+- L'anticipation des **DoT** tient compte de leur **temps d'incantation** : un
+  DoT qui s'incante en 3 s est prévenu au moins 3 s avant sa chute (et non
+  seulement selon l'avance globale réglée), pour éviter qu'il ne tombe entre
+  l'alerte et la fin du cast
+
+## v0.6.2 — DoT escomptés selon le temps de combat
+
+- Les **DoT** ne sont plus valorisés à leur durée pleine : on les escompte au
+  prorata du **temps de combat restant**. Sur un combat court (trash, gros pack
+  qui fond), un DoT qui n'a pas le temps de tiquer jusqu'au bout passe derrière
+  les sorts directs, dans le tableau d'**Optimisation** comme dans l'overlay
+  **rotation live** (qui arrête alors de conseiller de le reposer)
+- Nouveau réglage **« Combat type (s) »** dans l'onglet Optimisation : durée de
+  combat estimée. 0 = auto (médiane de l'historique des encounters). En live, le
+  temps restant décroît avec l'encounter en cours, donc les DoT se démonétisent
+  à l'approche de la mort de la cible
+
 ## v0.6.1 — Overlays redimensionnables
 
 - Les overlays **mécaniques** et **rotation** se redimensionnent maintenant par

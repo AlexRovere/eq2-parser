@@ -98,6 +98,10 @@ pub struct Config {
     pub spell_damage: HashMap<String, f64>,
     /// Optimisation : nombre de cibles du scénario courant.
     pub opt_targets: u32,
+    /// Optimisation : durée de combat type (s) pour escompter les DoT qui
+    /// n'iront pas à leur terme. 0 = auto (médiane de l'historique) ; si
+    /// l'historique est vide, pas d'escompte (DoT supposés complets).
+    pub opt_fight_secs: f32,
     /// Optimisation : cibles liées (même encounter) pour le scaling AoE.
     pub opt_linked: bool,
     /// Optimisation : masquer les sorts hors-base (procs/pets/cast inféré).
@@ -176,6 +180,7 @@ impl Default for Config {
             cast_overrides: HashMap::new(),
             spell_damage: HashMap::new(),
             opt_targets: 1,
+            opt_fight_secs: 0.0,
             opt_linked: true,
             opt_hide_unknown: false,
             opt_sort_key: "eff".into(),

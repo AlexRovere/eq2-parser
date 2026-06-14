@@ -1769,6 +1769,19 @@ impl App {
                      inféré). Par défaut tout ce que tu as lancé est affiché.",
                 )
                 .changed();
+            ui.separator();
+            ui.label("Combat type (s)");
+            let auto = self
+                .history_median_ttk()
+                .map(|m| format!("auto : médiane historique = {m:.0} s"))
+                .unwrap_or_else(|| "auto : historique vide, aucun escompte".into());
+            scenario_changed |= ui
+                .add(egui::DragValue::new(&mut self.config.opt_fight_secs).range(0.0..=600.0))
+                .on_hover_text(format!(
+                    "Durée de combat estimée : escompte les DoT qui n'auront pas le temps de \
+                     tiquer jusqu'au bout (combats courts, gros packs qui fondent). 0 = {auto}.",
+                ))
+                .changed();
         });
         if scenario_changed {
             self.config.save();
@@ -1846,6 +1859,7 @@ impl App {
         let sc = Scenario {
             targets: self.config.opt_targets,
             linked: self.config.opt_linked,
+            remaining: self.scenario_remaining(false),
         };
         let mut rows = report(
             &obs,
@@ -4521,6 +4535,53 @@ impl App {
         self.mech_dragging = drag_now;
     }
 
+    /// Durée de combat type (s) servant à escompter les DoT : réglage manuel
+    /// (`opt_fight_secs`) sinon médiane des encounters de l'historique. 0 si on
+    /// ne sait rien (pas d'escompte).
+    fn fight_duration(&self) -> f32 {
+        if self.config.opt_fight_secs > 0.0 {
+            return self.config.opt_fight_secs;
+        }
+        self.history_median_ttk().unwrap_or(0.0)
+    }
+
+    /// Médiane des durées des encounters passés (s), `None` si historique vide.
+    fn history_median_ttk(&self) -> Option<f32> {
+        let mut ds: Vec<u64> = self
+            .engine
+            .history
+            .iter()
+            .map(|e| e.duration())
+            .filter(|&d| d > 0)
+            .collect();
+        if ds.is_empty() {
+            return None;
+        }
+        ds.sort_unstable();
+        Some(ds[ds.len() / 2] as f32)
+    }
+
+    /// Temps restant estimé pour le scénario, à passer à `Scenario.remaining`.
+    /// En vue planification (`live` = false) : la durée type entière. En live :
+    /// la durée type moins le temps déjà écoulé dans l'encounter courant, pour
+    /// que les DoT se démonétisent à l'approche de la mort de la cible.
+    fn scenario_remaining(&self, live: bool) -> Option<f32> {
+        let d = self.fight_duration();
+        if d <= 0.0 {
+            return None; // rien de connu : pas d'escompte.
+        }
+        if !live {
+            return Some(d);
+        }
+        let elapsed = self
+            .engine
+            .current
+            .as_ref()
+            .map(|c| Self::now_epoch().saturating_sub(c.start) as f32)
+            .unwrap_or(0.0);
+        Some((d - elapsed).max(0.0))
+    }
+
     /// Sorts profilés du perso suivi (mêmes données que l'onglet Optimisation),
     /// pour alimenter la rotation live. Renvoie le perso retenu et ses lignes.
     fn rotation_rows(&self) -> Option<(String, Vec<crate::optimizer::SpellRow>)> {
@@ -4539,6 +4600,7 @@ impl App {
         let sc = crate::optimizer::Scenario {
             targets: self.config.opt_targets,
             linked: self.config.opt_linked,
+            remaining: self.scenario_remaining(true),
         };
         let rows = crate::optimizer::report(
             &obs,

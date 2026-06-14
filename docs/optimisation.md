@@ -61,7 +61,16 @@ réordonne selon le combat (un AoE remonte en pack, retombe en mono).
    - **auto** depuis tes logs après un combat (valeur mesurée, en bleu) ;
    - **manuels** sinon : tu saisis la valeur du tooltip (planification à froid).
 4. **Stats joueur** (par perso) : casting speed %, reuse %, recovery.
-5. **Filtres scénario** : Mono / N cibles / cibles liées.
+5. **Filtres scénario** : Mono / N cibles / cibles liées / **Combat type (s)**.
+
+   Le réglage **Combat type (s)** escompte les **DoT** au prorata du temps de
+   combat restant : un DoT de 24 s sur un combat de 6 s ne vaut que ~1/4 de ses
+   dégâts (il n'a pas le temps de tiquer jusqu'au bout), donc il recule derrière
+   les sorts directs. `0` = auto (médiane des durées de l'historique des
+   encounters). En **rotation live**, le temps restant décroît avec l'encounter
+   en cours : les DoT cessent d'être conseillés à l'approche de la mort de la
+   cible. Mets une grande valeur (ou laisse l'historique la donner) pour un
+   named long, une petite pour du trash qui fond.
 
 Surcharges (cast ou dégâts édités à la main) en **orange** ; bouton
 **↺ Réinit. surcharges** pour effacer. Case par sort pour **masquer** (renvoie

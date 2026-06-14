@@ -49,7 +49,7 @@ fn main() {
     let obs = engine.prof.live(&name);
     let class = db.infer_class(obs.keys());
     let stats = PlayerStats::default();
-    let sc = Scenario { targets, linked };
+    let sc = Scenario { targets, linked, remaining: None };
     let rows = report(
         &obs,
         &db,
