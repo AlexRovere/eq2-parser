@@ -19,14 +19,41 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Vérifier que le tag correspond à Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $crate = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $crate) {
+            Write-Error "Tag $tag != version Cargo.toml $crate : bumpe Cargo.toml ou corrige le tag."
+            exit 1
+          }
+          Write-Host "Version OK : $tag"
+
       - name: Tests
         run: cargo test --release
 
       - name: Build
         run: cargo build --release
 
+      - name: Extraire les notes du CHANGELOG
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $notes = @()
+          $inSection = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match "^##\s+v$([regex]::Escape($tag))\b") { $inSection = $true; continue }
+            elseif ($inSection -and $line -match "^##\s+v") { break }
+            elseif ($inSection) { $notes += $line }
+          }
+          if (($notes -join '').Trim().Length -eq 0) { $notes = @("Release $tag") }
+          ($notes -join "`n").Trim() | Out-File -FilePath release_notes.md -Encoding utf8
+
       - name: Publier la release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
+          body_path: release_notes.md
           files: target/release/eq2-parser.exe
-          generate_release_notes: true
+          fail_on_unmatched_files: true
