@@ -1,5 +1,7 @@
 # EQ2 Parser — Combat Parser & Overlay
 
+[![Release](https://github.com/AlexRovere/eq2-parser/actions/workflows/release.yml/badge.svg)](https://github.com/AlexRovere/eq2-parser/actions/workflows/release.yml) [![Dernière version](https://img.shields.io/github/v/release/AlexRovere/eq2-parser)](https://github.com/AlexRovere/eq2-parser/releases/latest)
+
 Parser de logs de combat **EverQuest II** en temps réel avec overlay DPS/HPS, façon
 ACT (Advanced Combat Tracker), en un seul `.exe` (~7 Mo, Rust + egui).
 
